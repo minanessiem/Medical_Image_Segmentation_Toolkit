@@ -1,0 +1,18 @@
+# Native Python execution outside a Docker container.
+profile: native
+case_batch_size: 1
+num_workers: 0
+require_cuda: false
+timeout_seconds: null
+
+constraints:
+  allowed_output_spaces:
+    - model_preprocessed
+    - native_input
+  allowed_precisions:
+    - fp16
+    - fp32
+    - bf16
+  allow_ground_truth: true
+  allow_threshold_sweep: true
+  allow_intermediate_artifacts: true

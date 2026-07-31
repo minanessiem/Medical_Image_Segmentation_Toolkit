@@ -1,0 +1,24 @@
+output_space: model_preprocessed
+precision: fp32
+
+sliding_window:
+  enabled: true
+  sw_batch_size: 1
+  overlap: 0.5
+  blend_mode: gaussian
+  padding_mode: constant
+
+tta:
+  enabled: false
+
+ensemble:
+  enabled: false
+
+decision:
+  threshold: 0.5
+
+postprocessing:
+  enabled: false
+
+artifacts:
+  enabled: false

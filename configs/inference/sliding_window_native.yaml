@@ -1,0 +1,5 @@
+defaults:
+  - sliding_window_model_space
+  - _self_
+
+output_space: native_input

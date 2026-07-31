@@ -1,0 +1,15 @@
+profile: gc_submission
+case_batch_size: 1
+num_workers: 0
+require_cuda: true
+timeout_seconds: 600
+
+constraints:
+  allowed_output_spaces:
+    - native_input
+  allowed_precisions:
+    - fp16
+    - fp32
+  allow_ground_truth: false
+  allow_threshold_sweep: false
+  allow_intermediate_artifacts: false

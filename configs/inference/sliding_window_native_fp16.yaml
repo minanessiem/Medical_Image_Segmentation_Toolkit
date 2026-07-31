@@ -1,0 +1,5 @@
+defaults:
+  - sliding_window_native
+  - _self_
+
+precision: fp16
