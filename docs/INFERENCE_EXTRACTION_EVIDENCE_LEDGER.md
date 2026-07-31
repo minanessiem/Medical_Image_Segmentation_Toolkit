@@ -90,15 +90,30 @@ LRZ and desktop tests consume isolated snapshots. Changing an overlaid file afte
 |---|---|
 | Evidence ID | `E001` |
 | Slurm job | `5722967` |
-| State last observed | `PENDING (Resources)` |
+| State | `ACCEPTED` |
 | Submitted | `2026-07-31T00:52:51+02:00` |
 | Scheduled start last observed | `2026-07-31T03:30:47+02:00` |
 | Time limit | 10 minutes |
 | CAP relationship | Completes the remaining measured-output portion of Cut 0 |
 | Development blocking | No: Cuts 1-3 contracts, model loading, and preprocessing can proceed |
-| Migration blocking | Yes: do not certify Cut 4 numerical parity or remove the legacy prediction path until E001 is reconciled |
+| Migration blocking | No: accepted baseline artifacts are available for Cut 4 parity |
 
 Scheduler start times are advisory. Query Slurm rather than assuming the timestamp above remains current.
+
+The job later completed with state `COMPLETED`, exit code `0:0`, and elapsed
+time `00:02:00`. Its batch step reported approximately 4 MiB MaxRSS and the
+main container step approximately 2.24 GiB MaxRSS. Reconciliation accepted the
+result because the manifest recorded the pinned commit, checkpoint and focused
+split hashes, all four requested cases, finite probability summaries within
+`[0, 1]`, per-case artifacts, metrics, timings, and GPU-memory measurements.
+
+Peak reserved GPU memory across the four cases was 7.578 GiB on the 16 GB V100;
+total case inference time was 16.691 seconds. The stderr contained dependency
+warnings and a generator-finalization exception emitted after all cases and
+the complete manifest were written. This is classified as a non-fatal legacy
+harness cleanup defect, not ignored as clean behavior; it should be eliminated
+when the evaluation generator is migrated, but it does not invalidate the
+captured tensors.
 
 ### Question being answered
 
@@ -724,6 +739,139 @@ Log SHA-256:
 3903d1694f02ee6502df22a4f1b27fb59a312c2f9371f8092b6bf1e1ddec9d71
 ```
 
+---
+
+## Evidence item E008: Superseded Cut 2 strict/artifact prototype
+
+### Status
+
+Superseded by the agreed transition-only Cut 2 boundary. The retained desktop
+results remain useful evidence that the selected DynUNet config and checkpoint
+can be reconstructed on CPU/CUDA, but the tested bundle, hashing, strict-loader,
+config-projection, and multi-model implementation is intentionally not part of
+Cut 2 and must not be cited as acceptance evidence for the replacement code.
+
+### Question being answered
+
+Historical question only: could a proposed strict artifact-oriented loader be
+made to work? After review, this question was found to anticipate later release
+and ensemble cuts rather than characterize the ownership transfer required by
+Cut 2.
+
+### Pinned code state
+
+| Concern | Value |
+|---|---|
+| Base commit | `a29dca5` (`feat(inference): define shared inference contracts`) |
+| Base archive SHA-256 | `e666b04cee2a2e502c70ee24e1b91dbe009366db7e03875b83dc5e9700bb90d9` |
+| Cut 2 overlay SHA-256 | `28c2a8dc7c8ac5ff39f32e5f2ce0fb6dfae64b0e93d412b5c2d88d21d6e7076e` |
+| Desktop snapshot | `/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut2_dev_20260731b` |
+| Python environment | `/mnt/c/Users/minanessiem/Development/MedSegDiff_env/bin/activate` |
+| Python | `3.10.12` |
+| PyTorch | `2.8.0+cu128` |
+| OmegaConf | `2.3.0` |
+
+The overlay contains only the active Cut 2 implementation, tests, CAP
+correction, and its directly required Cut 1 contract relocation. It does not
+contain the untracked Cut 0 utilities or fixtures.
+
+### Tests
+
+```bash
+python -m unittest \
+  tests.test_model_bundle \
+  tests.test_model_loader \
+  tests.test_inference_contracts \
+  tests.test_evaluation_model_loader \
+  tests.test_checkpoint_state \
+  tests.test_training_runtime_contracts \
+  tests.test_discriminative_adapter \
+  tests.test_discriminative_output_domains \
+  tests.test_data_contract_generalization \
+  tests.test_dynunet_phase5_profiles \
+  tests.test_evaluation_model_config \
+  tests.test_evaluation_io_model_volumes \
+  tests.test_evaluation_pipeline \
+  -v
+```
+
+All 116 tests passed in 8.193 seconds.
+
+Retained desktop log:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut2_dev_20260731b/cut2_regression_tests.log
+```
+
+Log SHA-256:
+
+```text
+4c81d958b5e836b0c0c39843e86cc308e9ed50ead0234b3e0f64a1b2c1aeb0ed
+```
+
+### Covered acceptance evidence
+
+- bundle paths are confined beneath the model root and config/weight hashes
+  are checked before a descriptor is returned;
+- full saved configs are resolved and retained as read-only provenance;
+- construction receives a mutable copy with validation/evaluation/inference
+  policy removed;
+- model input-channel synchronization still derives from the existing data
+  contract without mutating saved provenance;
+- unwrapped, leading `module.`, and embedded `model.module.` checkpoints load
+  strictly;
+- missing keys fail strict deployment loading and remain reportable through
+  the explicit permissive compatibility mode;
+- stored BF16 tensors do not force BF16 execution dtype;
+- prepared models are placed on one explicit device, set to evaluation mode,
+  and have gradients disabled;
+- the existing evaluation checkpoint-discovery and loader interface remains
+  green through its compatibility facade;
+- training checkpoint save/load behavior and 2D/diffusion runtime guardrails
+  remain green.
+
+### Real selected-model desktop smoke
+
+The pinned p5n1 config and 22 MB raw checkpoint were copied from LRZ storage to
+an isolated desktop artifact directory. No LRZ compute job was submitted for
+this check.
+
+| Concern | Value |
+|---|---|
+| Artifact directory | `/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut2_model_artifacts_20260731a` |
+| Test snapshot | `/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut2_real_model_20260731a` |
+| Config SHA-256 | `7152715bded1f11cc244a8a4270b6cc592b8a0e555f40d6d40af5b2924cc918a` |
+| Checkpoint SHA-256 | `120c93ee6a32f79829bf8a6b2d3ab7db59861f865ad1e8a37889f87ab0c82441` |
+| Final overlay SHA-256 | `95fd3afd35ff72aa7cb5ae6c5da9ea3e3aa6373f2653a5fd6e71e8995e549e84` |
+| GPU | NVIDIA GeForce RTX 4070 Ti SUPER, 16 GB |
+| Runtime | Python `3.10.12`, PyTorch `2.8.0+cu128` |
+| Strict key transform | `unwrapped` |
+| Missing/unexpected keys | `0 / 0` |
+| State tensors | All 52 exactly equal to the legacy construction path |
+| Parameters | 5,641,315, stored as FP32 |
+| Prepared state | `eval()`, gradients disabled, all parameters on `cuda:0` |
+| Strict CPU preparation | 39.656 seconds including cold imports/construction |
+| Strict CUDA preparation | 0.395 seconds after imports were warm |
+| Peak CUDA allocated/reserved | 22,567,936 / 27,262,976 bytes |
+
+Retained result:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut2_real_model_20260731a/strict_model_smoke.json
+SHA-256: 5da4bbc1f7cd89c454025db62704870cd160da18ee264983db2357b508e80194
+```
+
+Retained log:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut2_real_model_20260731a/strict_model_smoke.log
+SHA-256: 3a7b3292115ad39348e76f37b94dbf55e83ab7cee8c4d157944daa5b8725b034
+```
+
+This establishes real artifact reconstruction and CUDA placement on the
+no-queue desktop. It is not a T4 performance certification; that remains Cut
+11 and must use the final container/runtime candidate.
+
 ### Desktop testing procedure for subsequent cuts
 
 1. Never update or overlay the dirty desktop repository for Codex cut testing.
@@ -738,6 +886,94 @@ Log SHA-256:
 5. Run a script that changes into that snapshot and explicitly sources `MedSegDiff_env`.
 6. Run tests narrow-to-broad; record exact commands and results here.
 7. Remove transfer archives and runners, retaining only useful test snapshots.
+
+---
+
+## Evidence item E009: Cut 2 transition-only model loading parity
+
+### Status
+
+Complete for the revised Cut 2 boundary: existing single-model evaluation
+construction, checkpoint-to-model loading, and channel-contract helpers were
+physically transferred into `src/models/` without introducing release,
+artifact, ensemble, hash, compatibility-signature, or preparation policy.
+
+### Question being answered
+
+Can model-owned loading behavior move out of the evaluation/training utility
+locations while preserving the current evaluation API, checkpoint fallback and
+diagnostics, training checkpoint behavior, requested device mapping, model
+parameters, evaluation state, and gradient state?
+
+### Pinned code state
+
+| Concern | Value |
+|---|---|
+| Base commit | `a29dca5` (`feat(inference): define shared inference contracts`) |
+| Base archive SHA-256 | `e666b04cee2a2e502c70ee24e1b91dbe009366db7e03875b83dc5e9700bb90d9` |
+| Revised Cut 2 overlay SHA-256 | `3c908fc40088260d23f15e96a93655f2c10f47d92b220d6e637732762841b12d` |
+| Desktop snapshot | `/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut2_transition_20260731c` |
+| Python environment | `/mnt/c/Users/minanessiem/Development/MedSegDiff_env/bin/activate` |
+| Python | `3.10.12` |
+| PyTorch | `2.8.0+cu128` |
+
+The snapshot is the committed Cut 1 base plus only the revised Cut 2 files. It
+does not modify or depend on the desktop repository checkout.
+
+### Regression tests
+
+```bash
+python -m unittest \
+  tests.test_model_loader \
+  tests.test_evaluation_model_loader \
+  tests.test_checkpoint_state \
+  tests.test_inference_contracts \
+  tests.test_training_runtime_contracts \
+  tests.test_discriminative_adapter \
+  tests.test_discriminative_output_domains \
+  tests.test_data_contract_generalization \
+  tests.test_dynunet_phase5_profiles \
+  tests.test_evaluation_model_config \
+  tests.test_evaluation_io_model_volumes \
+  tests.test_evaluation_pipeline \
+  -v
+```
+
+All 106 tests passed in 7.924 seconds.
+
+Retained log:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut2_transition_20260731c/cut2_transition_tests.log
+SHA-256: 2a94a3dcee1dd6e314880d3553d00c0b533b58915065ef411e3ebbd350dacc18
+```
+
+### Real selected-model parity
+
+The retained p5n1 resolved config and selected checkpoint were reconstructed
+once through the exact pre-transfer evaluation sequence and once through
+`src.models.model_loader.load_model()` on CPU.
+
+| Check | Result |
+|---|---|
+| Missing/unexpected keys, legacy path | `0 / 0` |
+| Missing/unexpected keys, moved path | `0 / 0` |
+| State-dict tensors | All 52 exactly equal |
+| State-dict key order | Identical |
+| Preparation state | Both `eval()` |
+| Gradient state | Both retain `requires_grad=True` |
+| Device | Both CPU for this parity run |
+
+Retained log:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut2_transition_20260731c/cut2_real_model_parity.log
+SHA-256: 72c740d94bc386015dca74aa1fdb7f11eb866f80699238272fa2b68c1d60d7c5
+```
+
+This evidence supersedes E008 for Cut 2 acceptance. E008 remains a historical
+prototype record only; its strict, bundle, hash, multi-model, config-projection,
+CPU-first, and frozen-parameter behaviors were removed from the active cut.
 
 ---
 

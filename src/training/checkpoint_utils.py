@@ -14,6 +14,12 @@ import torch
 import torch.nn as nn
 from typing import Dict, List, Tuple
 
+from src.models.checkpoint_loading import (
+    _extract_checkpoint_state_dict,
+    _normalize_state_dict_keys_for_model,
+    load_model_state_dict_compat,
+)
+
 
 def should_save_best_checkpoint(
     val_results: Dict[str, float],
@@ -559,81 +565,4 @@ def load_checkpoint(
         'training_state': training_state,
         'global_step': training_state.get('global_step', step),
     }
-
-
-def _extract_checkpoint_state_dict(payload: dict) -> dict:
-    """
-    Extract raw model state dict from common checkpoint payload structures.
-    """
-    if not isinstance(payload, dict):
-        return payload
-    if 'model_state_dict' in payload and isinstance(payload['model_state_dict'], dict):
-        return payload['model_state_dict']
-    if 'state_dict' in payload and isinstance(payload['state_dict'], dict):
-        return payload['state_dict']
-    return payload
-
-
-def _normalize_state_dict_keys_for_model(model: nn.Module, state_dict: dict) -> dict:
-    """
-    Normalize checkpoint keys to maximize overlap with target model state keys.
-
-    Handles common wrapper prefixes from DP/DDP and adapter wrappers.
-    """
-    state_dict = _extract_checkpoint_state_dict(state_dict)
-    if not isinstance(state_dict, dict):
-        return state_dict
-
-    model_keys = set(model.state_dict().keys())
-    checkpoint_keys = set(state_dict.keys())
-    if model_keys & checkpoint_keys:
-        return state_dict
-
-    prefixes_to_strip = [
-        'module.',
-        'wrapped_model.base_model.',
-        'model.model.',
-        'model.',
-    ]
-
-    candidates = [state_dict]
-    for prefix in prefixes_to_strip:
-        if any(k.startswith(prefix) for k in state_dict.keys()):
-            stripped = {
-                k[len(prefix):] if k.startswith(prefix) else k: v
-                for k, v in state_dict.items()
-            }
-            candidates.append(stripped)
-
-    # If model is wrapped but checkpoint is unwrapped, add module. prefix candidate.
-    if any(k.startswith('module.') for k in model_keys):
-        candidates.append({f"module.{k}": v for k, v in state_dict.items()})
-
-    best = state_dict
-    best_overlap = len(model_keys & checkpoint_keys)
-    for cand in candidates:
-        overlap = len(model_keys & set(cand.keys()))
-        if overlap > best_overlap:
-            best = cand
-            best_overlap = overlap
-
-    return best
-
-
-def load_model_state_dict_compat(model: nn.Module, checkpoint_state: dict) -> Tuple[List[str], List[str]]:
-    """
-    Load checkpoint model state into model with DP/DDP prefix compatibility.
-
-    Returns:
-        (missing_keys, unexpected_keys)
-    """
-    normalized_state = _normalize_state_dict_keys_for_model(model, checkpoint_state)
-
-    try:
-        model.load_state_dict(normalized_state, strict=True)
-        return [], []
-    except RuntimeError:
-        missing, unexpected = model.load_state_dict(normalized_state, strict=False)
-        return list(missing), list(unexpected)
-
 

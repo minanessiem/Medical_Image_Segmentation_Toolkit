@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 from numbers import Integral, Real
-from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Tuple, runtime_checkable
 
 import torch
@@ -20,10 +19,6 @@ class InferenceError(RuntimeError):
 
 class UnsupportedModelError(InferenceError):
     """The requested model family or dimensionality is not supported."""
-
-
-class InvalidBundleError(InferenceError):
-    """A model bundle is missing, ambiguous, or internally inconsistent."""
 
 
 class InvalidInferencePolicyError(InferenceError):
@@ -51,72 +46,6 @@ class ResourceLimitError(InferenceError):
 
 
 Affine = Tuple[Tuple[float, float, float, float], ...]
-
-
-@dataclass(frozen=True)
-class ModelBundleMemberDescriptor:
-    """One exact saved model config and checkpoint within a model bundle."""
-
-    member_id: str
-    config_path: Path
-    weights_path: Path
-    config_sha256: Optional[str] = None
-    weights_sha256: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.member_id, str) or not self.member_id.strip():
-            raise InvalidBundleError("Model bundle member_id must not be empty.")
-        if not isinstance(self.config_path, Path):
-            raise InvalidBundleError(
-                f"Model bundle member {self.member_id!r} config_path must be a pathlib.Path."
-            )
-        if not isinstance(self.weights_path, Path):
-            raise InvalidBundleError(
-                f"Model bundle member {self.member_id!r} weights_path must be a pathlib.Path."
-            )
-
-
-@dataclass(frozen=True)
-class ModelBundleDescriptor:
-    """Resolved, transport-independent description of an inference bundle."""
-
-    schema_version: int
-    inference_api_version: int
-    members: Tuple[ModelBundleMemberDescriptor, ...]
-    inference_policy_path: Path
-    code_commit: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.schema_version, bool)
-            or not isinstance(self.schema_version, Integral)
-            or self.schema_version <= 0
-            or isinstance(self.inference_api_version, bool)
-            or not isinstance(self.inference_api_version, Integral)
-            or self.inference_api_version <= 0
-        ):
-            raise InvalidBundleError(
-                "Bundle schema_version and inference_api_version must both be positive integers."
-            )
-        if not self.members:
-            raise InvalidBundleError("A model bundle must contain at least one member.")
-        invalid_member_types = [
-            type(member).__name__
-            for member in self.members
-            if not isinstance(member, ModelBundleMemberDescriptor)
-        ]
-        if invalid_member_types:
-            raise InvalidBundleError(
-                "Model bundle members must be ModelBundleMemberDescriptor instances, "
-                f"got invalid types {invalid_member_types}."
-            )
-        member_ids = [member.member_id for member in self.members]
-        if len(member_ids) != len(set(member_ids)):
-            raise InvalidBundleError(
-                f"Model bundle member IDs must be unique, got {member_ids}."
-            )
-        if not isinstance(self.inference_policy_path, Path):
-            raise InvalidBundleError("Model bundle inference_policy_path must be a pathlib.Path.")
 
 
 @dataclass(frozen=True)

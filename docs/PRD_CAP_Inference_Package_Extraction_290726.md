@@ -22,8 +22,8 @@ The work is intentionally limited to the existing 3D discriminative model family
 The target system has three separate but interlocking release components:
 
 1. **Container infrastructure and code snapshot**: the Linux/amd64 Docker image, pinned Python/CUDA/PyTorch/MONAI runtime, Grand Challenge HTTP lifecycle, and repository inference code at a recorded commit.
-2. **Shared inference code**: model construction, preprocessing, probability prediction, sliding-window execution, spatial inversion, TTA/ensembling, thresholding, postprocessing, and output validation.
-3. **Model artifact bundle**: one or more immutable complete saved training configs and exact checkpoints, plus the selected shared inference config and provenance manifest, packaged so Grand Challenge expands it under `/opt/ml/model/`. Historical training-validation settings remain present for provenance but are not active when an explicit inference config is selected.
+2. **Shared inference code**: preprocessing, probability prediction through an already prepared model, sliding-window execution, spatial inversion, TTA/ensembling, thresholding, postprocessing, and output validation.
+3. **Model artifact archive and model lifecycle support**: one complete saved training config and one selected checkpoint, plus the selected shared inference config and provenance, packaged so Grand Challenge expands them under `/opt/ml/model/`. Shared model-domain code reconstructs the model through the existing factory, loads its weights, and moves it to the requested device. Historical training-validation settings remain present for provenance but are not active when an explicit inference config is selected.
 
 The first certified release must prioritize correctness, spatial fidelity, reproducibility, T4 memory safety, and the ten-minute per-case runtime limit over optional competition enhancements.
 
@@ -98,9 +98,9 @@ A separately composed `cfg.inference_runtime` config describing the execution ca
 
 Runtime profiles enforce allowed output spaces, case batch size, worker policy, timeout, CUDA requirements, label availability, threshold-sweep permission, and diagnostic-artifact permission. They constrain the shared inference policy and fail on incompatible requests rather than silently rewriting them.
 
-### 3.6 Model bundle
+### 3.6 Model artifact archive
 
-The contents of the tarball expanded beneath `/opt/ml/model/`. A bundle identifies the complete saved config and checkpoint for each ensemble member, the selected inference policy, content hashes, compatibility version, and provenance. The runtime projects model-owned fields from each saved config and does not activate its historical `validation.inference` settings when an explicit shared inference policy is supplied.
+The contents of the tarball expanded beneath `/opt/ml/model/`. The first submission archive contains one complete saved config, one exact checkpoint, the selected inference policy, and release provenance. It is a packaging artifact, not a runtime abstraction for a collection of models. The initial runtime loads one model. Any later multi-model representation must be introduced by the ensemble cut from demonstrated requirements rather than anticipated here.
 
 ### 3.7 Predictor
 
@@ -134,7 +134,7 @@ An independently implementable CAP unit. Every cut below includes its own contex
 - The maximum execution time is ten minutes per case.
 - The model is loaded before per-case invocation whenever the platform lifecycle allows it.
 - Model artifacts are separate from the image and reside at `/opt/ml/model/`.
-- Model bundle creation accepts a training run directory and a specific checkpoint/snapshot, matching the existing evaluation mental model.
+- Model artifact creation accepts a training run directory and a specific checkpoint/snapshot, matching the existing evaluation mental model.
 - Existing BF16-trained checkpoints remain eligible. Autocast precision used during training does not encode BF16-only weights into an ordinary PyTorch state dict. Deployment precision is independently selected and tested, initially FP16 on T4 with FP32 fallback for diagnosis.
 - Initial sliding-window batch size is one even if the training validation config used a larger window batch.
 - Training validation, offline evaluation, local/container diagnostics, and production deployment share the same `inference` configuration schema.
@@ -200,24 +200,25 @@ No fictional socket slug or path may be hardcoded while this manifest is unavail
 
 ### 5.1 Functional goals
 
-1. Provide a reusable `src/inference/` package that loads a trained repository model and returns calibrated probability maps for 3D discriminative segmentation.
-2. Make training-time validation and offline evaluation consume the same low-level prediction implementation.
-3. Provide label-free preprocessing derived from the existing ISLES26 preprocessing contract.
-4. Preserve sufficient spatial metadata to invert prediction probabilities to the original input grid.
-5. Support direct and MONAI sliding-window inference with deployment-safe defaults.
-6. Introduce one shared top-level inference config family for training validation, offline evaluation, repository inference, container diagnostics, and GC deployment.
-7. Introduce separate evaluation and runtime-profile configs so shared inference options can be reused without allowing label-dependent or platform-invalid combinations.
-8. Support optional probability-space TTA, multi-checkpoint/model ensembling, thresholding, and conservative postprocessing through the shared inference policy.
-9. Build and test a Grand Challenge-compatible Docker image containing the runtime and repository code snapshot.
-10. Build a replaceable model tarball from one or more run-directory/checkpoint specifications.
-11. Build the image and model bundle independently or together.
-12. Produce machine-readable provenance and resource measurements for every release candidate.
+1. Provide a reusable `src/inference/` package that accepts a prepared repository model/predictor and returns calibrated probability maps for 3D discriminative segmentation.
+2. Provide shared model-domain artifact and loading code that reconstructs a trained repository model without coupling model lifecycle behavior to inference execution or an evaluation script.
+3. Make training-time validation and offline evaluation consume the same low-level prediction implementation.
+4. Provide label-free preprocessing derived from the existing ISLES26 preprocessing contract.
+5. Preserve sufficient spatial metadata to invert prediction probabilities to the original input grid.
+6. Support direct and MONAI sliding-window inference with deployment-safe defaults.
+7. Introduce one shared top-level inference config family for training validation, offline evaluation, repository inference, container diagnostics, and GC deployment.
+8. Introduce separate evaluation and runtime-profile configs so shared inference options can be reused without allowing label-dependent or platform-invalid combinations.
+9. Support optional probability-space TTA, multi-checkpoint/model ensembling, thresholding, and conservative postprocessing through the shared inference policy.
+10. Build and test a Grand Challenge-compatible Docker image containing the runtime and repository code snapshot.
+11. Build a replaceable model tarball from one run-directory/checkpoint specification.
+12. Build the image and model artifact archive independently or together.
+13. Produce machine-readable provenance and resource measurements for every release candidate.
 
 ### 5.2 Quality goals
 
 - Prediction parity between the pre-extraction and post-extraction evaluation paths within defined numerical tolerance.
 - Exact native-output shape and verified affine/world-space consistency with the input; explicit transformed-grid metadata for model-space results.
-- Strict, fail-fast model bundle validation.
+- Strict, fail-fast validation of the eventual release model artifact.
 - Deterministic behavior when TTA and stochastic behavior are disabled.
 - No runtime network dependency.
 - No data-loader worker subprocess requirement inside the single-case container.
@@ -290,7 +291,7 @@ This is the core extraction opportunity: move the reusable prediction behavior i
 
 `scripts/evaluation/core/model_loader.py` provides checkpoint discovery and repository model construction for evaluation. `src/utils/train_utils.py::build_model_and_diffusion()` performs related construction with training-specific DP/DDP wrapping and data-contract channel synchronization.
 
-Inference needs a canonical single-device builder that preserves channel synchronization and the existing model/diffusion factory while excluding distributed training concerns. Deployment loading must be strict. Legacy compatibility loading and training resume must remain permissive where currently required.
+The model domain needs a shared home for the existing evaluation model/diffusion construction and checkpoint-loading behavior while distributed training construction remains training-owned. The first step is a physical ownership transfer into `src/models/` with legacy facades and no behavior change. Release-only strictness, artifact validation, and any additional preparation policy are introduced later at their actual deployment boundary. `src/inference/` consumes an already constructed model through its predictor boundary and does not discover checkpoints or own model artifact hashes.
 
 ### 7.5 Existing probability and threshold analysis
 
@@ -326,12 +327,10 @@ scripts/gc_submission_builder model build
             |
             v
 /opt/ml/model/
-  bundle_manifest.json
+  artifact_manifest.json
+  config.yaml
+  weights.pth
   inference_policy.yaml
-  members/
-    model_000/
-      config.yaml
-      weights.pth
 
                      Shared config composition
        +-------------------+-----------------------+
@@ -361,7 +360,8 @@ Grand Challenge adapter      src/inference     Evaluation/training wrappers
 | Concern | Owner | Reason |
 |---|---|---|
 | Model architecture and trained preprocessing | Saved run config | Prevent deployment drift |
-| Exact weights | Model bundle member | Independently replaceable artifact |
+| Exact weights | Model artifact archive | Independently replaceable artifact |
+| Model artifact validation, reconstruction, weight loading, and device preparation | `src/models/` | Shared model lifecycle behavior must not depend on inference or evaluation frontends |
 | Output space, precision, sliding-window policy, TTA, ensemble, fixed threshold, postprocessing | Shared `inference` config | One prediction policy across all consumers |
 | Metrics, threshold sweeps/oracles, validation cadence, checkpoint selection | `validation` / `evaluation` config | Label-dependent assessment is not inference |
 | Case batch, workers, timeout, device and allowed capabilities | `inference_runtime` profile | Location/mode constraints must not duplicate scientific policy |
@@ -381,8 +381,6 @@ src/inference/
   contracts.py              # typed requests/results/traces/capability errors
   policy.py                 # shared inference config parsing and validation
   runtime.py                # execution-profile capabilities and cross-validation
-  bundle.py                 # manifest/config/checkpoint discovery and validation
-  model_loader.py           # strict single-device repository model construction
   preprocessing.py          # label-free/shared deterministic preprocessing
   predictors.py             # predictor protocol and discriminative implementation
   sliding_window.py         # MONAI sliding-window orchestration
@@ -392,12 +390,18 @@ src/inference/
   postprocessing.py         # threshold and optional binary morphology/filtering
   pipeline.py               # end-to-end orchestration independent of transport
 
+src/models/
+  model_factory.py          # existing architecture construction registry
+  model_config.py           # model/data channel contract helpers moved from training
+  checkpoint_loading.py     # existing state-dict extraction/normalization/loading
+  model_loader.py           # existing single-model evaluation construction/loading
+
 scripts/gc_submission_builder/
   __init__.py
   README.md
   cli.py                    # build-image, build-model, build-all, test, save
   build_config.py           # builder-only config validation
-  model_artifact.py         # deterministic bundle staging/tar creation
+  model_artifact.py         # deterministic artifact staging/tar creation
   release_manifest.py       # code/runtime/model provenance and hashes
   runtime/
     app.py                  # /health and /invoke server integration
@@ -444,20 +448,25 @@ Where practical, use the current official Grand Challenge template files rather 
 The first implementation should expose a small public surface rather than every internal helper. Conceptually:
 
 ```python
-bundle = load_inference_bundle(
-    model_root=Path("/opt/ml/model"),
+model, missing_keys, unexpected_keys = load_model(
+    cfg=saved_cfg,
+    checkpoint_path=Path("/opt/ml/model/weights.pth"),
     device=torch.device("cuda:0"),
 )
+predictor = build_probability_predictor(model)
 
 result = predict_case(
-    bundle=bundle,
+    predictor=predictor,
     image_path=input_path,
     inference_cfg=cfg.inference,
     runtime_cfg=cfg.inference_runtime,
 )
 ```
 
-The returned result should distinguish at least:
+Model construction, checkpoint loading, and device placement are model-domain operations.
+The inference API begins from prepared predictors and should not know how their
+config and checkpoint paths were discovered. The returned prediction result
+should distinguish at least:
 
 - the configured primary result in `model_preprocessed` or `native_input` space;
 - optional diagnostic intermediate probabilities when the runtime profile permits them;
@@ -468,51 +477,40 @@ The returned result should distinguish at least:
 
 The predictor-level contract should operate on tensors and return probabilities in `[0, 1]`, with explicit `[B, C, *spatial]` shape semantics. It should not read files, calculate metrics, or write NIfTI outputs.
 
-### 8.4 Model bundle layout and manifest
+### 8.4 Model artifact archive layout and manifest
 
 The model tarball should expand directly into:
 
 ```text
 /opt/ml/model/
-  bundle_manifest.json
+  artifact_manifest.json
+  config.yaml
+  weights.pth
   inference_policy.yaml
-  members/
-    model_000/
-      config.yaml
-      weights.pth
-    model_001/               # optional later ensemble member
-      config.yaml
-      weights.pth
 ```
 
 The manifest should contain generated facts, not duplicate model configuration:
 
 ```json
 {
-  "bundle_schema_version": 1,
   "inference_api_version": 1,
   "created_at_utc": "...",
   "code_commit": "...",
-  "members": [
-    {
-      "id": "model_000",
-      "source_run": "...",
-      "source_checkpoint": "...",
-      "config_path": "members/model_000/config.yaml",
-      "weights_path": "members/model_000/weights.pth",
-      "config_sha256": "...",
-      "weights_sha256": "..."
-    }
-  ],
+  "source_run": "...",
+  "source_checkpoint": "...",
+  "config_path": "config.yaml",
+  "weights_path": "weights.pth",
+  "config_sha256": "...",
+  "weights_sha256": "...",
   "inference_policy_path": "inference_policy.yaml"
 }
 ```
 
 Absolute source paths may be recorded in a local build report but should be optional or redacted from the distributable manifest if they reveal infrastructure details.
 
-Each member's `config.yaml` is the complete resolved training config, including its historical validation section. Keeping it provides reproducibility and avoids prematurely inventing a reduced model-config schema. At runtime, model construction projects only the model-owned and trained-preprocessing fields. When the bundle supplies `inference_policy.yaml`, that explicit shared policy is active; historical `config.yaml::validation.inference` values are retained but are not merged into or allowed to override it.
+`config.yaml` is the complete resolved training config, including its historical validation section. Keeping it provides reproducibility and avoids prematurely inventing a reduced model-config schema. When the archive supplies `inference_policy.yaml`, that explicit shared policy is active; historical `config.yaml::validation.inference` values are retained but are not merged into or allowed to override it.
 
-The builder command should accept one or more pairs of:
+The initial builder command accepts one pair of:
 
 - training run directory;
 - checkpoint/snapshot name or exact checkpoint path within that run.
@@ -780,11 +778,11 @@ This permits ordinary validation and container diagnostics in either valid resul
 | `src/data/loader_stack/isles26_loader.py` | Share deterministic preprocessing builder | Extract reusable image-only/image-label transforms; retain training augmentation behavior |
 | `src/utils/valid_utils.py` | Compatibility façade and legacy config translator | Delegate prediction/sliding-window construction to `src/inference`; translate historical `validation.inference` when no explicit top-level policy exists |
 | `src/training/trainer.py::validate_one_epoch` | Shared predictor/config consumer | Compose top-level inference plus native runtime; retain labels, metrics, progress, cadence, and logging |
-| `src/utils/train_utils.py` | Reuse construction primitives only | Keep DP/DDP training builder; expose/reuse channel synchronization without coupling deployment to distributed setup |
-| `src/training/checkpoint_utils.py` | Shared prefix normalization where safe | Add strict deployment mode or strict caller; preserve resume compatibility behavior |
+| `src/utils/train_utils.py` | Transfer model-owned channel helpers | Import the unchanged helpers from `src/models/model_config.py`; keep the DP/DDP training builder in place |
+| `src/training/checkpoint_utils.py` | Compatibility facade for moved loading helpers | Re-export the unchanged checkpoint-to-model helpers from `src/models/checkpoint_loading.py`; preserve resume behavior |
 | `src/diffusion/discriminative_adapter.py` | First predictor backend dependency | Reuse final-head/probability behavior; validate output-domain contract |
 | `src/utils/ensemble.py` | Selective reuse/migration | Mean is eligible; soft STAPLE remains disabled for 3D until generalized |
-| `scripts/evaluation/core/model_loader.py` | Delegate common bundle/model loading | Preserve evaluation checkpoint CLI behavior while removing duplicated construction |
+| `scripts/evaluation/core/model_loader.py` | Delegate common model construction/loading to `src/models/` | Preserve evaluation checkpoint CLI behavior and run-directory discovery while removing duplicated model lifecycle behavior |
 | `scripts/evaluation/io/model_volumes.py` | Shared predictor/config consumer | Retain volume sample identity/metadata; route model/native result space and matching label space explicitly |
 | `scripts/evaluation/core/evaluation_pipeline.py` | Assessment consumer | Continue metrics, threshold protocols, reports, and provenance; validate prediction/reference geometry |
 | `scripts/analysis/threshold_analysis.py` | Legacy migration/deprecation | Do not extend independently; later delegate or retire after parity |
@@ -809,13 +807,13 @@ Every implementation cut must preserve these invariants where applicable:
 6. **Result-space contract:** every result declares `model_preprocessed` or `native_input`; every metric pairs prediction and reference in the same verified space.
 7. **GC spatial contract:** production GC output is always `native_input` and matches input shape and physical geometry.
 8. **Case batch invariant:** case batch size is one under `gc_submission`.
-9. **Strict release loading:** missing/unexpected state-dict keys fail model initialization.
+9. **Strict release loading:** the eventual release gate must reject missing/unexpected state-dict keys. The transition cut does not change the established permissive training/evaluation behavior.
 10. **Explicit policy precedence:** top-level `cfg.inference` replaces rather than field-merges with historical `cfg.validation.inference`.
 11. **No hidden fallback:** unsupported TTA, ensemble, precision, model family, output space, or interface fails clearly.
 12. **No label dependency:** deployment preprocessing accepts an image without a label.
 13. **No network runtime:** all required files and packages are inside the image or model mount.
 14. **No multiprocessing dependency:** production case loading runs in-process; no DataLoader worker pool is necessary.
-15. **Independent artifacts:** the Docker image can be rebuilt without model weights, and a model bundle can be rebuilt without changing the image.
+15. **Independent artifacts:** the Docker image can be rebuilt without model weights, and the model artifact archive can be rebuilt without changing the image.
 16. **Reproducible provenance:** code, runtime, saved config, active inference config, runtime profile, and weights are hashable and recorded.
 17. **Enhancements are opt-in:** baseline inference remains available when TTA, ensembling, and component filtering are disabled.
 
@@ -910,7 +908,6 @@ Cut 0 baseline records.
 ### Desired changes
 
 1. Define typed structures for:
-   - model bundle/member descriptors;
    - predictor capabilities;
    - preprocessed case;
    - spatial trace;
@@ -919,7 +916,6 @@ Cut 0 baseline records.
    - declared output/result space.
 2. Define explicit errors for:
    - unsupported model family/dimensionality;
-   - invalid bundle;
    - invalid policy;
    - invalid predictor/result tensors;
    - spatial restoration failure;
@@ -962,11 +958,11 @@ Remove the new package and tests; no consumers have migrated yet.
 
 ---
 
-## 14. Cut 2: Strict model bundle and single-device model loading
+## 14. Cut 2: Transfer single-model loading into `src/models`
 
 ### Context
 
-Evaluation and training currently construct models through related but distinct paths. Deployment requires exact saved-config reconstruction and strict checkpoint loading, while training resume still needs legacy prefix compatibility.
+Evaluation and training currently own model-related helpers in workflow-oriented locations. Before extracting prediction execution, the existing single-model evaluation loader, checkpoint-to-model helpers, and channel-contract helpers need model-domain homes. This cut is an ownership transition, not a deployment-loader redesign: externally observable loading, partial-load reporting, device mapping, configuration mutation, gradient state, and prefix handling remain unchanged. Strict release enforcement and artifact validation are deferred to the later release-artifact/runtime cuts.
 
 ### Dependencies
 
@@ -974,60 +970,53 @@ Cuts 0-1.
 
 ### Affected files and components
 
-- new `src/inference/bundle.py`
-- new `src/inference/model_loader.py`
-- `scripts/evaluation/core/model_loader.py`
-- `src/utils/train_utils.py` only if a small common construction helper must be exposed
-- `src/training/checkpoint_utils.py` only if strict loading can be added without changing resume defaults
+- new `src/models/checkpoint_loading.py`
+- new `src/models/model_config.py`
+- new `src/models/model_loader.py`
+- `src/inference/contracts.py` and `src/inference/__init__.py` to remove the provisional, unneeded multi-model artifact types from the inference API
+- `scripts/evaluation/core/model_loader.py` as the legacy evaluation facade
+- `src/utils/train_utils.py` as the legacy training consumer of moved channel helpers
+- `src/training/checkpoint_utils.py` as the compatibility facade for moved checkpoint helpers
 - `src/models/model_factory.py`
 - `src/diffusion/diffusion.py`
 - `src/diffusion/discriminative_adapter.py`
-- new `tests/test_inference_bundle.py`
-- new `tests/test_inference_model_loader.py`
+- new `tests/test_model_loader.py`
+- existing `tests/test_inference_contracts.py`
 - existing `tests/test_evaluation_model_loader.py`
 
 ### Desired changes
 
-1. Load each member's saved resolved config without applying architecture overrides.
-2. Preserve the complete resolved config, including historical validation fields, as immutable provenance.
-3. Project model-owned/trained-preprocessing fields for construction without activating historical validation policy.
-4. Preserve existing `sync_model_image_channels_with_data_contract()` behavior or extract a safe shared helper.
-5. Build the model through `src.models.build_model()` and the existing diffusion/discriminative factory.
-6. Reject non-3D and non-discriminative bundles in the initial backend with an explicit capability error.
-7. Resolve exactly one requested checkpoint per member.
-8. Normalize known DP/DDP key prefixes, then require no missing or unexpected model keys.
-9. Put the model on one explicit device, call `.eval()`, and disable gradients.
-10. Validate ensemble member compatibility for:
-   - input channels/modalities;
-   - spatial dimensionality;
-   - preprocessing contract;
-   - output channels;
-   - native output semantics.
-11. Validate manifest hashes before loading.
-12. Allow FP16 autocast at execution time without rewriting stored weights.
-13. Refactor evaluation's loader to delegate shared construction while preserving its existing run-dir/checkpoint CLI contract.
+1. Transfer `_extract_checkpoint_state_dict()`, `_normalize_state_dict_keys_for_model()`, and `load_model_state_dict_compat()` from `src/training/checkpoint_utils.py` to `src/models/checkpoint_loading.py` without broadening their accepted layouts or changing their strict-first/permissive-fallback behavior.
+2. Re-export those functions from the training module so historical imports and training resume behavior continue to work.
+3. Transfer the existing model/data channel-contract helpers from `src/utils/train_utils.py` to `src/models/model_config.py` without changing their config reads, mutation, messages, or validation behavior.
+4. Keep the existing training utilities as consumers of those transferred helpers; do not move or redesign distributed training construction.
+5. Transfer evaluation's existing single-model construction sequence into `src/models/model_loader.py`: build through `src.models.build_model()`, wrap through `Diffusion.build_diffusion()`, load the checkpoint on the requested device, move to that device, and call `.eval()`.
+6. Do not add config projection/copying, read-only provenance objects, CPU-first loading, parameter freezing, strict-only modes, new prefix transforms, model-family restrictions, manifests, hashes, or multi-model APIs.
+7. Keep evaluation checkpoint discovery, model-name/EMA selection, diagnostics, and public function signatures in `scripts/evaluation/core/model_loader.py`.
+8. Make that evaluation module a thin facade over the moved single-model lifecycle while preserving its observable return values and diagnostic reporting.
+9. Remove the provisional model-artifact/member contracts from `src/inference`; inference receives an already constructed model/predictor and does not discover checkpoints or artifacts.
 
 ### Expected tests and testing components
 
-- Load a representative DynUNet state dict saved with no wrapper, DP prefix, and DDP prefix.
-- Missing/unexpected keys fail in deployment mode.
-- Existing permissive training resume behavior is unchanged.
-- A config/weight hash mismatch fails before model construction.
-- An explicit top-level inference policy does not inherit historical `validation.inference.sliding_window.sw_batch_size` or other legacy execution values.
-- A mismatched ensemble member fails with a field-specific error.
-- BF16-trained checkpoint loads under FP32 and FP16 execution modes.
-- Existing evaluation model-loader tests remain green.
-- A real selected checkpoint passes a CPU construction smoke test if memory permits and a GPU smoke test in the standardized environment.
+- Existing unwrapped and supported leading-wrapper checkpoint layouts load exactly as before.
+- Existing partial state-dict loading still reports missing/unexpected keys rather than becoming a new strict failure.
+- Tests exercise the moved implementation directly and the legacy training/evaluation import paths.
+- The shared loader receives the original config object and requested `map_location`, and preserves the established model build/wrap/load/`eval()` sequence.
+- Existing evaluation checkpoint discovery and model-loader tests remain green.
+- Existing training checkpoint, resume, data-contract, 2D, and diffusion tests remain green.
+- A real selected checkpoint produces identical state tensors through the old characterized sequence and the moved implementation in the standardized desktop environment.
 
 ### Acceptance criteria
 
-- The same saved config and checkpoint produce the same model parameters through old evaluation and new inference loaders.
-- Deployment never proceeds after partial state-dict loading.
-- Training DP/DDP behavior and resume behavior are not regressed.
+- The same config and checkpoint produce the same model parameters and preparation state through the legacy evaluation interface and the moved shared loader.
+- The evaluation-facing checkpoint-discovery and model-loading API remains compatible.
+- Training DP/DDP construction, checkpoint prefix handling, partial-load reporting, and resume behavior are not regressed.
+- No bundle, ensemble-member, manifest, hash-validation, or strict-release abstraction is introduced.
+- `src/inference/` has no model-artifact discovery or model-loader responsibility.
 
 ### Rollback
 
-Keep the new loader unused and restore evaluation imports to their previous functions.
+Restore evaluation and training imports to their previous local implementations; no artifact or inference consumer has migrated yet.
 
 ---
 
@@ -1186,7 +1175,7 @@ Cuts 0-4.
 
 ### Desired changes
 
-1. Replace evaluation-owned model construction/prediction mechanics with `src.inference` calls.
+1. Replace evaluation-owned model construction with `src.models` calls and prediction mechanics with `src.inference` calls.
 2. Continue obtaining images, labels, case IDs, and evaluation metadata through existing dataloaders.
 3. Continue returning `VolumeSample` contracts to the evaluation engine.
 4. Compose the active top-level `cfg.inference` and `cfg.inference_runtime=native` instead of defining a second evaluation-specific prediction schema.
@@ -1207,7 +1196,7 @@ Cuts 0-4.
 - Native-space evaluation can be run against labels in original geometry where fixtures/data permit.
 - A deliberately mismatched output/reference space fails before metric computation.
 - The same inference config can run in native Python and `gc_container_test` environments when both profiles allow its requested capabilities.
-- Provenance includes exact bundle member, checkpoint hash, config hash, policy hash, and code version.
+- Provenance includes the exact checkpoint, config hash, policy hash, and code version.
 - Failure to load the requested checkpoint remains clear at the CLI.
 
 ### Acceptance criteria
@@ -1418,7 +1407,7 @@ Set all enhancement flags to disabled and use the certified single-model baselin
 
 ### Context
 
-Grand Challenge permits model resources to be uploaded separately and expanded under `/opt/ml/model/`. The repository needs a reproducible builder that accepts the same run-directory/checkpoint specification used by evaluation, retains the complete saved config for every member, adds one explicitly selected shared inference config, and produces a self-validating tarball.
+Grand Challenge permits model resources to be uploaded separately and expanded under `/opt/ml/model/`. The repository needs a reproducible builder that accepts the same singular run-directory/checkpoint specification used by evaluation, retains the complete saved config, adds one explicitly selected shared inference config, and produces a self-validating tarball.
 
 ### Dependencies
 
@@ -1440,18 +1429,18 @@ Cuts 1-4; Cut 8 if the final policy schema is included.
 
 ### Desired changes
 
-1. Provide a command that accepts one or more run-dir/checkpoint member specifications and an explicit shared inference-policy path.
-2. Copy, never mutate or trim, each complete resolved training config and exact checkpoint into a staging directory.
-3. Reject missing `.hydra/config.yaml`, ambiguous checkpoints, unsupported model contracts, duplicate member IDs, or incompatible ensemble members.
+1. Provide a command that accepts one run-dir/checkpoint specification and an explicit shared inference-policy path.
+2. Copy, never mutate or trim, the complete resolved training config and exact checkpoint into a staging directory.
+3. Reject a missing `.hydra/config.yaml`, ambiguous checkpoint, or unsupported initial-release model contract.
 4. Generate SHA-256 hashes and a versioned manifest.
-5. Validate the staged bundle by loading it through `src.inference` before packaging.
+5. Validate the staged artifact by loading its singular model through the shared model-domain and inference paths before packaging.
 6. Create `algorithmmodel.tar.gz` with contents rooted correctly for `/opt/ml/model/` extraction.
 7. Support independent `build-model` and combined `build-all` commands.
-8. Make archive generation deterministic where practical by normalizing member order and metadata timestamps, or document any unavoidable nondeterminism.
+8. Make archive generation deterministic where practical by normalizing metadata timestamps and file order, or document any unavoidable nondeterminism.
 9. Emit a local build report containing source paths, artifact paths, sizes, hashes, and validation result.
 10. Refuse to package optimizer state, datasets, logs, or unrelated training artifacts.
-11. Record that the bundled explicit inference policy is active and historical member `validation.inference` blocks are provenance-only.
-12. Validate the bundle against the `gc_submission` runtime profile before packaging, including native output, case batch one, fixed threshold, and no evaluation sweep.
+11. Record that the archived explicit inference policy is active and the historical saved `validation.inference` block is provenance-only.
+12. Validate the artifact against the `gc_submission` runtime profile before packaging, including native output, case batch one, fixed threshold, and no evaluation sweep.
 
 ### Expected tests and testing components
 
@@ -1459,16 +1448,16 @@ Cuts 1-4; Cut 8 if the final policy schema is included.
 - Manifest hashes match extracted files.
 - Exact requested checkpoint is used.
 - Ambiguous/missing checkpoints fail.
-- Single-member and compatible multi-member bundles validate.
-- Unsupported diffusion or 2D bundle fails for the initial release profile.
-- Historical `validation.inference.sw_batch_size=4` remains visible in the copied saved config but does not override a bundled GC policy selecting one.
-- Bundle loads when mounted at a temporary `/opt/ml/model` equivalent.
+- A singular model artifact validates and loads strictly at the release boundary.
+- Unsupported diffusion or 2D artifact fails for the initial release profile.
+- Historical `validation.inference.sw_batch_size=4` remains visible in the copied saved config but does not override an archived GC policy selecting one.
+- The artifact loads when mounted at a temporary `/opt/ml/model` equivalent.
 - Repeated builds from identical inputs have identical logical manifests and, if deterministic tar metadata is implemented, identical archive hashes.
 
 ### Acceptance criteria
 
-- A model bundle can be rebuilt without rebuilding the Docker image.
-- The bundle is fully load-tested before being declared successful.
+- A model artifact archive can be rebuilt without rebuilding the Docker image.
+- The artifact is fully load-tested before being declared successful.
 - No model architecture value is duplicated in builder config.
 - Complete training provenance is retained without activating its historical validation policy.
 
@@ -1515,8 +1504,8 @@ Cuts 0-7 and Cut 9. The final exact interface manifest is needed for upload cert
 4. Include all runtime dependencies at image build time; assume no runtime network.
 5. Run as a non-root user with write access only where required.
 6. Preserve the required Grand Challenge invoke label.
-7. Load and validate the model bundle during `init_model()` before health becomes ready.
-8. Compose the bundled shared inference policy with `inference_runtime=gc_submission` for the production server and fail on incompatible capabilities.
+7. Load and validate the singular model artifact during `init_model()` before health becomes ready.
+8. Compose the archived shared inference policy with `inference_runtime=gc_submission` for the production server and fail on incompatible capabilities.
 9. Read `/input/inputs.json`, calculate the sorted socket-slug interface key, and dispatch through the interface manifest.
 10. For the ISLES26 single interface, require exactly one 3D T1 image and only the other values specified by the official phase.
 11. If technical-parameter JSON is required, parse and validate it for transport/provenance only. Do not condition the model on it in this scope.
@@ -1546,13 +1535,13 @@ Cuts 0-7 and Cut 9. The final exact interface manifest is needed for upload cert
 
 ### Acceptance criteria
 
-- The image and model bundle pass the current Grand Challenge template's local test lifecycle.
+- The image and model artifact archive pass the current Grand Challenge template's local test lifecycle.
 - The container performs no scientific prediction logic outside `src.inference`.
 - The image is independently buildable and saveable without embedding replaceable weights.
 
 ### Rollback
 
-Use the last certified image tag and model bundle. Container releases must be immutable and content-addressed in the release report.
+Use the last certified image tag and model artifact archive. Container releases must be immutable and content-addressed in the release report.
 
 ---
 
@@ -1607,13 +1596,13 @@ Cuts 0-10.
 
 ### Acceptance criteria
 
-- A release report proves resource compliance for the exact image, model bundle, interface fixture, inference policy, output space, and runtime profile.
+- A release report proves resource compliance for the exact image, model artifact, interface fixture, inference policy, output space, and runtime profile.
 - Optional enhancements that violate the budget are disabled even if they improve offline metrics.
 - The selected release configuration has explicit runtime headroom.
 
 ### Rollback
 
-Disable enhancements, retain `sw_batch_size=1`, or select a smaller compatible model bundle. Do not change trained model attributes in deployment config to manufacture compatibility.
+Disable enhancements, retain `sw_batch_size=1`, or select a smaller model artifact. Do not change trained model attributes in deployment config to manufacture compatibility.
 
 ---
 
@@ -1658,8 +1647,8 @@ Cuts 0-11 and the official ISLES26 interface manifest/starter pack.
 ### Expected tests and testing components
 
 - Clean-machine or clean-environment image load and invocation.
-- Model-only replacement test: same image, new compatible model bundle.
-- Image-only replacement test: same model bundle, new compatible code image.
+- Model-only replacement test: same image, new compatible singular model artifact.
+- Image-only replacement test: same model artifact, new compatible code image.
 - Deliberate incompatibility test fails during initialization.
 - Grand Challenge try-out job completes successfully.
 - Downloaded/returned segmentation has exact allowed values and expected geometry.
@@ -1722,7 +1711,7 @@ Recommended pull-request granularity is one cut per PR, except very small scaffo
 - runtime-profile capability validation;
 - top-level inference versus legacy validation-inference precedence;
 - fixed output-space vocabulary and result metadata;
-- bundle manifest/hash validation;
+- model artifact manifest/hash validation at the release boundary;
 - checkpoint prefix handling and strictness;
 - predictor shape/domain checks;
 - sliding-window parameter validation;
@@ -1826,7 +1815,7 @@ release/
 The release manifest links:
 
 - Docker image digest and archive hash;
-- model bundle hash;
+- model artifact hash;
 - every config and checkpoint hash;
 - repository commit and dirty-worktree status;
 - runtime versions;
@@ -1852,7 +1841,7 @@ A dirty worktree does not automatically prohibit development builds, but competi
 ### 28.2 Training/evaluation/deployment drift
 
 **Risk:** Three implementations slowly diverge.
-**Mitigation:** One `src/inference` predictor and preprocessing definition; wrappers retain consumer-specific work only.
+**Mitigation:** One shared `src/models` lifecycle implementation plus one `src/inference` predictor and preprocessing definition; wrappers retain consumer-specific work only.
 
 ### 28.3 Container configuration overrides the trained model
 
@@ -1916,6 +1905,7 @@ A dirty worktree does not automatically prohibit development builds, but competi
 This CAP is complete only when all of the following are true:
 
 - [ ] `src/inference/` is the canonical 3D discriminative prediction implementation.
+- [ ] `src/models/` owns shared single-model construction and checkpoint loading; release-only strict validation is used by deployment without changing legacy resume behavior.
 - [ ] Training validation, offline evaluation, native Python inference, container diagnostics, and GC deployment use one top-level `cfg.inference` schema.
 - [ ] `cfg.inference_runtime` profiles enforce native-Python, diagnostic-container, and submission capabilities without silently rewriting requested policy.
 - [ ] Existing saved runs containing only `cfg.validation.inference` remain supported through a tested compatibility translator.
@@ -1925,7 +1915,7 @@ This CAP is complete only when all of the following are true:
 - [ ] Label-free ISLES26 preprocessing shares the trained transform definition.
 - [ ] Native-space restoration passes shape, affine, and world-coordinate tests.
 - [ ] A model tarball can be built from run-dir/checkpoint specifications and loads strictly from `/opt/ml/model/`.
-- [ ] Docker image and model bundle build independently and together.
+- [ ] Docker image and model artifact archive build independently and together.
 - [ ] The container implements the current Grand Challenge HTTP lifecycle and runs non-root/offline.
 - [ ] The exact ISLES26 interface manifest is implemented with no placeholder socket slugs.
 - [ ] Output is a valid binary integer segmentation on the input grid.
@@ -1972,9 +1962,9 @@ The following boundaries should remain backend-neutral:
 - spatial trace and native-space inversion;
 - thresholding and postprocessing;
 - Grand Challenge transport and output validation;
-- bundle manifest versioning and capability declarations.
+- model artifact manifest versioning and capability declarations.
 
-A future diffusion implementation should therefore add a predictor backend and extend bundle capability validation rather than fork the container or spatial pipeline.
+A future diffusion implementation should therefore add a predictor backend and extend model-artifact capability validation rather than fork the container or spatial pipeline.
 
 The shared interface must nevertheless remain honest: until a backend passes 5D tests, `data_mode.dim=3d` plus a non-discriminative `diffusion.type` must fail with a clear capability error.
 
@@ -2073,7 +2063,7 @@ If 3D diffusion cannot meet the T4 limit, it may remain a training/research back
 6. **D5: 3D validation and ensemble generalization.** Remove runtime guards only for tested features.
 7. **D6: Full-volume/sliding-window scientific evaluation.** Establish accuracy, seam behavior, calibration, and stochastic variance.
 8. **D7: T4 feasibility gate.** Profile step counts, precision, memory, and total invocation time.
-9. **D8: Optional Grand Challenge enablement.** Permit diffusion bundles only after every previous cut passes and the bundle advertises the certified capability.
+9. **D8: Optional Grand Challenge enablement.** Permit a diffusion model artifact only after every previous cut passes and the artifact advertises the certified capability.
 
 This future work should be its own PRD/CAP. The present document supplies the integration boundary and evidence pointers, but does not authorize implementation of 3D diffusion as part of the ISLES26 discriminative submission milestone.
 
@@ -2084,7 +2074,7 @@ This future work should be its own PRD/CAP. The present document supplies the in
 The safest first vertical slice is:
 
 1. lock a real baseline;
-2. load one DynUNet bundle strictly;
+2. load one DynUNet model artifact strictly at the release boundary;
 3. preprocess one unlabeled T1 volume through the shared transforms;
 4. produce one sliding-window probability map;
 5. invert it to native space;

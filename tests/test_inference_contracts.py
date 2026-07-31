@@ -1,14 +1,10 @@
 import unittest
-from pathlib import Path
 
 import torch
 
 from src.inference.contracts import (
     InferenceInputError,
-    InvalidBundleError,
     InvalidPredictionError,
-    ModelBundleDescriptor,
-    ModelBundleMemberDescriptor,
     PredictionResult,
     PredictorCapabilities,
     PreprocessedCase,
@@ -166,29 +162,6 @@ class TestProbabilityOutputValidation(unittest.TestCase):
 
 
 class TestSpecializedContractErrors(unittest.TestCase):
-    def test_bundle_contract_uses_invalid_bundle_error(self):
-        member = ModelBundleMemberDescriptor(
-            member_id="model_000",
-            config_path=Path("config.yaml"),
-            weights_path=Path("weights.pth"),
-        )
-
-        with self.assertRaisesRegex(InvalidBundleError, "at least one member"):
-            ModelBundleDescriptor(
-                schema_version=1,
-                inference_api_version=1,
-                members=(),
-                inference_policy_path=Path("inference_policy.yaml"),
-            )
-
-        with self.assertRaisesRegex(InvalidBundleError, "must be unique"):
-            ModelBundleDescriptor(
-                schema_version=1,
-                inference_api_version=1,
-                members=(member, member),
-                inference_policy_path=Path("inference_policy.yaml"),
-            )
-
     def test_spatial_contract_uses_spatial_restoration_error(self):
         with self.assertRaisesRegex(SpatialRestorationError, "positive integers"):
             SpatialGeometry.identity((3, 0, 5))

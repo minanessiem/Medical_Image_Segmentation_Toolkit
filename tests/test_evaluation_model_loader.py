@@ -147,9 +147,8 @@ class TestEvaluationModelLoader(unittest.TestCase):
         self.assertEqual(resolve_diffusion_type(cfg), "OpenAI_DDPM")
         self.assertFalse(is_discriminative_config(cfg))
 
-    def test_build_model_for_evaluation_builds_adapter_and_loads_state(self):
+    def test_build_model_for_evaluation_delegates_to_shared_loader(self):
         cfg = OmegaConf.create({"diffusion": {"type": "Discriminative"}})
-        base_model = TinyModel()
         adapter = TinyModel()
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,12 +156,9 @@ class TestEvaluationModelLoader(unittest.TestCase):
             torch.save(adapter.state_dict(), checkpoint_path)
 
             with patch(
-                "scripts.evaluation.core.model_loader.build_model",
-                return_value=base_model,
-            ) as build_model_mock, patch(
-                "scripts.evaluation.core.model_loader.Diffusion.build_diffusion",
-                return_value=adapter,
-            ) as build_diffusion_mock:
+                "scripts.evaluation.core.model_loader.load_model",
+                return_value=(adapter, [], []),
+            ) as load_model_mock:
                 loaded = build_model_for_evaluation(
                     cfg=cfg,
                     checkpoint_path=checkpoint_path,
@@ -170,12 +166,11 @@ class TestEvaluationModelLoader(unittest.TestCase):
                 )
 
         self.assertIs(loaded, adapter)
-        self.assertFalse(loaded.training)
-        build_model_mock.assert_called_once_with(cfg)
-        build_diffusion_mock.assert_called_once()
-        self.assertIs(build_diffusion_mock.call_args.args[0], base_model)
-        self.assertIs(build_diffusion_mock.call_args.args[1], cfg)
-        self.assertEqual(str(build_diffusion_mock.call_args.args[2]), "cpu")
+        load_model_mock.assert_called_once_with(
+            cfg,
+            checkpoint_path=checkpoint_path,
+            device="cpu",
+        )
 
 
 if __name__ == "__main__":

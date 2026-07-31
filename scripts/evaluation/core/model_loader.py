@@ -11,9 +11,10 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 
-from src.diffusion.diffusion import Diffusion
-from src.models.model_factory import build_model
-from src.training.checkpoint_utils import load_model_state_dict_compat
+from src.models.model_loader import (
+    load_checkpoint_into_model as load_shared_checkpoint_into_model,
+    load_model,
+)
 
 
 CHECKPOINT_DIRS: Tuple[str, ...] = (
@@ -80,17 +81,12 @@ def build_model_for_evaluation(
     including ``sample(conditioned_image, ...)`` for diffusion and
     discriminative adapters.
     """
-    resolved_device = torch.device(device)
-    base_model = build_model(cfg)
-    model = Diffusion.build_diffusion(base_model, cfg, resolved_device)
-    missing_keys, unexpected_keys = load_checkpoint_into_model(
-        model=model,
+    model, missing_keys, unexpected_keys = load_model(
+        cfg,
         checkpoint_path=checkpoint_path,
-        device=resolved_device,
+        device=device,
     )
     _log_state_dict_diagnostics(missing_keys, unexpected_keys)
-    model.to(resolved_device)
-    model.eval()
     return model
 
 
@@ -102,8 +98,12 @@ def load_checkpoint_into_model(
     """
     Load a checkpoint into ``model`` using repository prefix compatibility.
     """
-    checkpoint_state = torch.load(Path(checkpoint_path), map_location=torch.device(device))
-    return load_model_state_dict_compat(model, checkpoint_state)
+    report = load_shared_checkpoint_into_model(
+        model,
+        checkpoint_path,
+        device=device,
+    )
+    return report
 
 
 def resolve_diffusion_type(cfg: DictConfig) -> str:
