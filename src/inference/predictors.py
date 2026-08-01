@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from numbers import Integral
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 import torch
+from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import OmegaConfBaseException
 
 from src.inference.contracts import (
     InferenceInputError,
     InvalidPredictionError,
+    ProbabilityPredictor,
     PredictorCapabilities,
     UnsupportedModelError,
     _validate_probability_tensor,
@@ -17,6 +21,71 @@ from src.inference.contracts import (
 
 
 SUPPORTED_PRECISIONS = frozenset({"fp16", "fp32", "bf16"})
+
+
+@dataclass(frozen=True)
+class DiscriminativeProbabilityPredictor:
+    """Expose an existing discriminative adapter through the shared protocol."""
+
+    backend: Any
+    capabilities: PredictorCapabilities
+
+    def predict(self, conditioned_image: torch.Tensor) -> torch.Tensor:
+        """Delegate probability generation without interpreting model outputs."""
+
+        return self.backend.sample(conditioned_image, disable_tqdm=True)
+
+
+def build_probability_predictor(
+    *,
+    backend: Any,
+    cfg: Mapping[str, Any] | DictConfig,
+) -> ProbabilityPredictor:
+    """Prepare the first supported backend without inspecting its architecture."""
+
+    root = OmegaConf.create(cfg) if not OmegaConf.is_config(cfg) else cfg
+    try:
+        configured_family = str(
+            OmegaConf.select(root, "diffusion.type", default="Discriminative")
+        ).strip()
+    except OmegaConfBaseException as exc:
+        raise UnsupportedModelError(
+            f"Could not resolve the configured predictor backend family: {exc}"
+        ) from exc
+
+    if configured_family.lower() != "discriminative":
+        raise UnsupportedModelError(
+            f"Configured inference backend {configured_family!r} is not supported by "
+            "the initial shared inference implementation. Implement and register a "
+            "backend adapter satisfying src.inference.contracts.ProbabilityPredictor "
+            "before enabling generative inference."
+        )
+    if not callable(getattr(backend, "sample", None)):
+        raise UnsupportedModelError(
+            "The discriminative inference backend must expose sample(conditioned_image, "
+            "disable_tqdm=...) returning probabilities."
+        )
+
+    capabilities = PredictorCapabilities(
+        model_family="discriminative",
+        spatial_dims=_resolve_spatial_dims(root, backend),
+        input_channels=_resolve_positive_int(
+            root,
+            path="model.image_channels",
+            fallback=getattr(backend, "image_channels", None),
+        ),
+        output_channels=_resolve_positive_int(
+            root,
+            path="model.out_channels",
+            fallback=getattr(backend, "mask_channels", None),
+        ),
+        supported_precisions=tuple(sorted(SUPPORTED_PRECISIONS)),
+    )
+    validate_predictor_capabilities(capabilities)
+    return DiscriminativeProbabilityPredictor(
+        backend=backend,
+        capabilities=capabilities,
+    )
 
 
 def validate_predictor_capabilities(
@@ -127,3 +196,93 @@ def validate_probability_output(
                 f"{tuple(probability.shape[2:])} != {tuple(conditioned_image.shape[2:])}."
             )
     return probability
+
+
+def predict_probabilities(
+    predictor: ProbabilityPredictor,
+    conditioned_image: torch.Tensor,
+) -> torch.Tensor:
+    """Execute one prepared predictor call and enforce its tensor contract."""
+
+    capabilities = validate_predictor_capabilities(predictor.capabilities)
+    _validate_conditioned_image(conditioned_image, capabilities)
+    probability = predictor.predict(conditioned_image)
+    return validate_probability_output(
+        probability,
+        conditioned_image=conditioned_image,
+        spatial_dims=capabilities.spatial_dims,
+        output_channels=capabilities.output_channels,
+    )
+
+
+def _validate_conditioned_image(
+    conditioned_image: torch.Tensor,
+    capabilities: PredictorCapabilities,
+) -> None:
+    if not torch.is_tensor(conditioned_image):
+        raise InferenceInputError("conditioned_image must be a torch.Tensor.")
+    if not conditioned_image.is_floating_point():
+        raise InferenceInputError("conditioned_image must be floating-point.")
+    expected_rank = int(capabilities.spatial_dims) + 2
+    if conditioned_image.ndim != expected_rank:
+        raise InferenceInputError(
+            "conditioned_image has the wrong rank: "
+            f"expected {expected_rank}, got {conditioned_image.ndim}."
+        )
+    if int(conditioned_image.shape[1]) != int(capabilities.input_channels):
+        raise InferenceInputError(
+            "conditioned_image has incorrect channels: "
+            f"expected {capabilities.input_channels}, got {conditioned_image.shape[1]}."
+        )
+
+
+def _resolve_spatial_dims(root: Any, backend: Any) -> int:
+    try:
+        value = (
+            OmegaConf.select(root, "model.spatial_dims", default=None)
+            or OmegaConf.select(root, "data_mode.dim", default=None)
+            or getattr(backend, "spatial_dims", None)
+        )
+    except OmegaConfBaseException as exc:
+        raise UnsupportedModelError(
+            f"Could not resolve predictor spatial dimensionality: {exc}"
+        ) from exc
+    token = str(value).strip().lower()
+    if token.endswith("d"):
+        token = token[:-1]
+    if token not in {"2", "3"}:
+        raise UnsupportedModelError(
+            "Predictor spatial dimensionality must resolve to 2D or 3D; "
+            f"got {value!r}."
+        )
+    return int(token)
+
+
+def _resolve_positive_int(
+    root: Any,
+    *,
+    path: str,
+    fallback: Any,
+) -> int:
+    try:
+        value = OmegaConf.select(root, path, default=None)
+    except OmegaConfBaseException as exc:
+        raise UnsupportedModelError(
+            f"Could not resolve predictor capability {path}: {exc}"
+        ) from exc
+    if value is None:
+        value = fallback
+    if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+        raise UnsupportedModelError(
+            f"Predictor capability {path} must be a positive integer, got {value!r}."
+        )
+    return int(value)
+
+
+__all__ = [
+    "DiscriminativeProbabilityPredictor",
+    "build_probability_predictor",
+    "predict_probabilities",
+    "validate_predictor_capabilities",
+    "validate_probability_output",
+]

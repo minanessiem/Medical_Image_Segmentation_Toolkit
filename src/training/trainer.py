@@ -313,8 +313,8 @@ def validate_one_epoch(diffusion, val_dl, metrics, logger, global_step, cfg):
         ensemble_method = cfg.validation.ensemble.method
         print(f"  Ensemble validation: {num_ensemble_samples} samples, method='{ensemble_method}'")
 
-    from src.utils.valid_utils import build_validation_inferer
-    infer_batch = build_validation_inferer(diffusion=diffusion, cfg=cfg)
+    from src.inference.pipeline import build_model_probability_executor
+    infer_batch = build_model_probability_executor(backend=diffusion, cfg=cfg)
     progress_metric_keys = _resolve_validation_progress_metric_keys(cfg)
     
     pbar = tqdm(val_dl, desc="Validation", leave=True)
@@ -330,7 +330,7 @@ def validate_one_epoch(diffusion, val_dl, metrics, logger, global_step, cfg):
             for ensemble_idx in range(num_ensemble_samples):
                 sample = infer_batch(
                     img,
-                    volume_label=batch_label,
+                    progress_label=batch_label,
                     show_window_progress=(ensemble_idx == 0),
                 )
                 samples.append(sample)
@@ -342,7 +342,7 @@ def validate_one_epoch(diffusion, val_dl, metrics, logger, global_step, cfg):
             # Single sample (original behavior)
             pred_mask = infer_batch(
                 img,
-                volume_label=batch_label,
+                progress_label=batch_label,
                 show_window_progress=True,
             )
         
@@ -1557,4 +1557,3 @@ def step_based_train(cfg, diffusion, dataloaders, optimizer, scheduler, logger, 
     print(f"Step-based training complete at step {global_step}.")
     if main_process and best_metric_step is not None:
         print(f"Best model saved at step {best_metric_step} with {cfg.training.checkpoint_best.metric_name} = {best_metric_value:.4f}")
-

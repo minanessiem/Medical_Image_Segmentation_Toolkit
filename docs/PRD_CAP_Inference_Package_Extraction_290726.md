@@ -1,6 +1,6 @@
 # PRD and CAP: Shared Inference Package Extraction and ISLES26 Grand Challenge Submission Builder
 
-**Document version:** 1.2
+**Document version:** 1.3
 **Original date:** 2026-07-29
 **Last revised:** 2026-07-31
 **Status:** Draft for implementation
@@ -13,17 +13,17 @@
 
 ## 1. Executive decision
 
-This plan introduces one shared, production-oriented inference implementation under `src/inference/`. That implementation will become the common path by which a trained repository model produces a segmentation probability map. Existing training-time validation, offline evaluation, ordinary repository inference, container-based diagnostic validation, and the Grand Challenge submission runtime will all become consumers of that implementation.
+This plan introduces one shared, production-oriented inference implementation under `src/inference/`. That implementation will become the common path by which a trained repository model produces a segmentation probability map. Existing training-time validation, offline evaluation, native inference, container-based diagnostic validation, and the Grand Challenge submission runtime will all become consumers of that implementation.
 
 The same consumers will compose a shared top-level `inference` config family. Sliding-window execution, numerical precision, result space, TTA, probability ensembling, fixed thresholding, and postprocessing will no longer be defined independently for training validation and Grand Challenge inference. Validation/evaluation config will remain separate because it owns labels, metrics, threshold sweeps, checkpoint selection, and training cadence. A third `inference_runtime` config family will declare and enforce the capabilities and constraints of native Python, diagnostic-container, and production Grand Challenge execution.
 
-The work is intentionally limited to the existing 3D discriminative model family required for the ISLES26 submission, initially DynUNet. It does not add 3D diffusion training or 3D diffusion inference. The shared contract will be narrow enough that a future diffusion predictor can implement it without requiring the spatial, container, or output-writing layers to be redesigned.
+The first certified release is intentionally limited to the existing 3D discriminative model family required for the ISLES26 submission, initially DynUNet. The reusable loading, preprocessing, inference, and container-building infrastructure must nevertheless select dataset behavior from the saved model's registered dataset contract rather than hardcode ISLES26. It does not add 3D diffusion training or 3D diffusion inference. The shared contract will be narrow enough that a future diffusion predictor can implement it without requiring the spatial, container, or output-writing layers to be redesigned.
 
 The target system has three separate but interlocking release components:
 
-1. **Container infrastructure and code snapshot**: the Linux/amd64 Docker image, pinned Python/CUDA/PyTorch/MONAI runtime, Grand Challenge HTTP lifecycle, and repository inference code at a recorded commit.
+1. **Container infrastructure and code snapshot**: the Linux/amd64 Docker image, pinned Python/CUDA/PyTorch/MONAI runtime, Grand Challenge HTTP lifecycle, and inference code captured at a recorded repository commit.
 2. **Shared inference code**: preprocessing, probability prediction through an already prepared model, sliding-window execution, spatial inversion, TTA/ensembling, thresholding, postprocessing, and output validation.
-3. **Model artifact archive and model lifecycle support**: one complete saved training config and one selected checkpoint, plus the selected shared inference config and provenance, packaged so Grand Challenge expands them under `/opt/ml/model/`. Shared model-domain code reconstructs the model through the existing factory, loads its weights, and moves it to the requested device. Historical training-validation settings remain present for provenance but are not active when an explicit inference config is selected.
+3. **Model artifact archive and model lifecycle support**: one complete saved training config and one selected checkpoint, plus the selected shared inference config and provenance, packaged so Grand Challenge expands them under `/opt/ml/model/`. Shared model-domain code reconstructs the model through the existing factory, loads its weights, and moves it to the requested device. The saved `dataset.id`, modality contract, and preprocessing config select a registered dataset preprocessing adapter. Historical training-validation settings remain present for provenance but are not active when an explicit inference config is selected.
 
 The first certified release must prioritize correctness, spatial fidelity, reproducibility, T4 memory safety, and the ten-minute per-case runtime limit over optional competition enhancements.
 
@@ -63,11 +63,11 @@ It is authoritative for model architecture, input channels, dimensionality, prep
 
 ### 3.2 Inference policy
 
-A shared, separately versioned top-level Hydra/OmegaConf configuration family, represented as `cfg.inference`, that controls how a model and preprocessed image become a probability or segmentation result. It is composed by training validation, offline evaluation, local inference, container diagnostics, and Grand Challenge deployment. Examples include:
+A shared, separately versioned top-level Hydra/OmegaConf configuration family, represented as `cfg.inference`, that controls how a model and preprocessed image become a probability or segmentation result. It is composed by training validation, offline evaluation, native inference, container diagnostics, and Grand Challenge deployment. Examples include:
 
 - result/output space (`model_preprocessed` or `native_input`);
 - runtime precision;
-- sliding-window batch size, overlap, blend mode, and padding mode;
+- sliding-window enablement, batch size, overlap, blend mode, and padding mode;
 - TTA operations;
 - model ensemble combination;
 - probability threshold;
@@ -98,13 +98,21 @@ A separately composed `cfg.inference_runtime` config describing the execution ca
 
 Runtime profiles enforce allowed output spaces, case batch size, worker policy, timeout, CUDA requirements, label availability, threshold-sweep permission, and diagnostic-artifact permission. They constrain the shared inference policy and fail on incompatible requests rather than silently rewriting them.
 
+Throughout this document, **native** describes where inference or validation
+runs: ordinary Python outside the Grand Challenge container. **Repository
+model** describes what is being evaluated: a live PyTorch model implemented by
+this repository, as opposed to the separate nnU-Net baseline. Accordingly,
+`repository-model evaluation` remains valid provenance terminology, while
+`repository inference` and `repository validation` are called `native
+inference` and `native validation`.
+
 ### 3.6 Model artifact archive
 
 The contents of the tarball expanded beneath `/opt/ml/model/`. The first submission archive contains one complete saved config, one exact checkpoint, the selected inference policy, and release provenance. It is a packaging artifact, not a runtime abstraction for a collection of models. The initial runtime loads one model. Any later multi-model representation must be introduced by the ensemble cut from demonstrated requirements rather than anticipated here.
 
 ### 3.7 Predictor
 
-The backend-specific component that maps a preprocessed tensor to a probability tensor. The first implementation is a 3D discriminative predictor. A future 3D diffusion predictor may implement the same high-level contract.
+The backend-specific component that maps a preprocessed tensor to a probability tensor. It owns interpretation of the model's raw return value, including deep-supervision head selection and the activation required to produce probabilities. Shared inference sees only the architecture-neutral `ProbabilityPredictor` boundary and must not branch on model class or architecture name. The first registered implementation is a 3D discriminative predictor. A future 3D diffusion predictor may implement the same high-level contract after its probability and sliding-window semantics are certified.
 
 ### 3.8 Spatial trace
 
@@ -114,9 +122,17 @@ The metadata required to map a prediction from model/preprocessed space back to 
 
 An interface is the input/output combination assigned to a challenge phase. Each input or output is a socket. A socket slug is Grand Challenge's identifier for that socket and appears in `/input/inputs.json`; it is not a model attribute and is not invented by this repository. The phase or generated starter pack supplies the actual socket slugs and relative paths.
 
-Socket handling belongs only to the Grand Challenge transport adapter. No core inference module should know an ISLES26 socket slug.
+Socket handling belongs only to the Grand Challenge transport adapter. No core inference module should know an ISLES26 or other competition socket slug.
 
-### 3.10 Cut
+### 3.10 Registered dataset preprocessing adapter
+
+A repository-owned adapter selected by the saved `dataset.id`. It translates canonical raw dataset modality keys and the saved preprocessing configuration into the deterministic transform chain used for both labeled native validation and label-free inference. ISLES24 and ISLES26 are the initial registered adapters because the existing loader stack already supports both. Dataset-agnostic infrastructure means it can dispatch to any registered adapter; it does not mean an unknown dataset works without an implemented and tested adapter.
+
+### 3.11 Interface binding
+
+A user-supplied, competition-specific manifest entry that maps an arbitrary Grand Challenge input socket slug to a canonical raw modality key understood by the selected dataset adapter. For example, a phase slug such as `t1-weighted-mri` may bind to dataset key `T1`. The same manifest owns output slug/path/type and any technical-JSON bindings. These bindings are transport configuration, not model or preprocessing configuration.
+
+### 3.12 Cut
 
 An independently implementable CAP unit. Every cut below includes its own context, dependencies, affected files, required changes, tests, and acceptance criteria so it can be assigned to an agent with minimal additional conversation history.
 
@@ -137,12 +153,17 @@ An independently implementable CAP unit. Every cut below includes its own contex
 - Model artifact creation accepts a training run directory and a specific checkpoint/snapshot, matching the existing evaluation mental model.
 - Existing BF16-trained checkpoints remain eligible. Autocast precision used during training does not encode BF16-only weights into an ordinary PyTorch state dict. Deployment precision is independently selected and tested, initially FP16 on T4 with FP32 fallback for diagnosis.
 - Initial sliding-window batch size is one even if the training validation config used a larger window batch.
-- Training validation, offline evaluation, local/container diagnostics, and production deployment share the same `inference` configuration schema.
-- Repository and diagnostic-container execution may select `model_preprocessed` or `native_input` result space when prediction and reference labels are paired in the same space.
+- Training validation, offline evaluation, native/container diagnostics, and production deployment share the same `inference` configuration schema.
+- Native and diagnostic-container execution may select `model_preprocessed` or `native_input` result space when prediction and reference labels are paired in the same space.
 - Production `gc_submission` execution requires `native_input` output, case batch size one, and a fixed deployment threshold. It rejects label-dependent threshold sweeps.
 - The output is a binary segmentation with values `{0, 1}` and an integer voxel type, preferably `uint8`.
 - The output must match the original input grid and world-space geometry.
 - Generative inference, metadata-conditioned inference, and newly trained model families are outside the first submission scope.
+- The GC builder and runtime are dataset-agnostic across registered repository dataset adapters. The first certified release remains ISLES26-specific only in its selected model artifact and phase interface manifest.
+- Dataset construction exposes `load_labels: bool = True`. `test_flag`, which currently selects a data partition, remains independent and never implicitly enables or disables label loading.
+- Native blind inference and GC inference use `load_labels=False`; training, native validation, and repository-model evaluation retain `load_labels=True` unless explicitly performing blind inference.
+- Native geometry is captured independently for every case before preprocessing and before raw modality metadata is removed during channel merging. Different cases may have different shapes, spacings, orientations, and affines.
+- Modalities within one case are expected to satisfy the dataset's alignment contract. This CAP does not add a new pre-preprocessing cross-modality alignment validator.
 
 ### 4.2 Current Grand Challenge platform requirements
 
@@ -173,7 +194,7 @@ Primary external references:
 - <https://grand-challenge.org/documentation/faq-challenges-algorithm-test-data-to-container/>
 - <https://github.com/ezequieldlrosa/isles22-docker-template>
 
-### 4.3 ISLES26 interface manifest release gate
+### 4.3 Dataset-agnostic interface manifest and ISLES26 release gate
 
 The exact ISLES26 phase interface remains an external acceptance dependency. Before a container is considered upload-ready, capture from the competition phase or generated starter pack:
 
@@ -186,13 +207,15 @@ The exact ISLES26 phase interface remains an external acceptance dependency. Bef
 - required segmentation overlay values;
 - the official phase timeout and GPU assignment as displayed by the platform.
 
-This is not a request to infer model semantics from socket names. It is an I/O compatibility gate.
+The user supplies the manifest once the phase publishes its interface. Each input binding maps the phase socket slug to a canonical raw modality key required by the selected dataset adapter; slugs are never inferred from model semantics. Runtime validation proves that the provided canonical keys can produce every processed modality requested by the saved model config. One raw input may validly produce multiple processed channels. Missing, duplicate, or unknown bindings fail before prediction.
+
+This is an I/O compatibility gate, not an ISLES26 dependency in shared inference. A different competition may use different slugs, modalities, technical JSON, and output paths while reusing the same image and model, provided its manifest binds to a registered dataset adapter.
 
 There is a specific transport discrepancy to resolve: the project requirement supplied for ISLES26 is NIfTI (`.nii.gz`) input and output, while current general Grand Challenge documentation states that image socket payloads are accepted as MHA or TIFF. The implementation must proceed with NIfTI as the canonical internal and expected challenge format, but the final phase manifest must establish whether ISLES26 uses a file/custom socket for NIfTI or an image socket requiring another transport format.
 
 If boundary conversion is necessary, it must be lossless with respect to voxel values and physical geometry and must live only in the Grand Challenge I/O adapter. The shared inference package remains NIfTI/metadata aware and must not change trained preprocessing because of the transport wrapper.
 
-No fictional socket slug or path may be hardcoded while this manifest is unavailable. Tests may use clearly named fixture slugs.
+No fictional socket slug or path may be hardcoded while this manifest is unavailable. Tests may use clearly named fixture slugs, including slugs deliberately unrelated to the dataset's canonical key, to prove that the binding is explicit.
 
 ---
 
@@ -203,16 +226,17 @@ No fictional socket slug or path may be hardcoded while this manifest is unavail
 1. Provide a reusable `src/inference/` package that accepts a prepared repository model/predictor and returns calibrated probability maps for 3D discriminative segmentation.
 2. Provide shared model-domain artifact and loading code that reconstructs a trained repository model without coupling model lifecycle behavior to inference execution or an evaluation script.
 3. Make training-time validation and offline evaluation consume the same low-level prediction implementation.
-4. Provide label-free preprocessing derived from the existing ISLES26 preprocessing contract.
-5. Preserve sufficient spatial metadata to invert prediction probabilities to the original input grid.
+4. Provide deterministic, label-optional preprocessing through dataset adapters selected from the saved model's registered `dataset.id`, initially covering ISLES24 and ISLES26 without duplicating their trained transform definitions.
+5. Preserve per-case native spatial metadata before preprocessing and sufficient transform history to invert prediction probabilities to the original input grid.
 6. Support direct and MONAI sliding-window inference with deployment-safe defaults.
-7. Introduce one shared top-level inference config family for training validation, offline evaluation, repository inference, container diagnostics, and GC deployment.
+7. Introduce one shared top-level inference config family for training validation, offline evaluation, native inference, container diagnostics, and GC deployment.
 8. Introduce separate evaluation and runtime-profile configs so shared inference options can be reused without allowing label-dependent or platform-invalid combinations.
 9. Support optional probability-space TTA, multi-checkpoint/model ensembling, thresholding, and conservative postprocessing through the shared inference policy.
 10. Build and test a Grand Challenge-compatible Docker image containing the runtime and repository code snapshot.
 11. Build a replaceable model tarball from one run-directory/checkpoint specification.
 12. Build the image and model artifact archive independently or together.
 13. Produce machine-readable provenance and resource measurements for every release candidate.
+14. Keep Grand Challenge socket slugs and file layout at the transport boundary through an explicit user-supplied mapping to canonical dataset modality keys.
 
 ### 5.2 Quality goals
 
@@ -238,7 +262,7 @@ The following are explicitly outside this CAP:
 - Changing the scientific semantics of the saved training configuration.
 - Replacing Hydra across the repository.
 - Rewriting metric implementations.
-- Unifying repository-model inference with the external nnU-Net runtime.
+- Unifying live repository PyTorch model execution with the external nnU-Net runtime.
 - Generic multi-GPU inference in the Grand Challenge container.
 - Case batching greater than one.
 - Serving multiple simultaneous requests.
@@ -246,6 +270,8 @@ The following are explicitly outside this CAP:
 - Lesion-volume-conditioned postprocessing research.
 - Automatic selection of a competition threshold from hidden test data.
 - Enabling an enhancement such as TTA, ensembling, or component filtering without validation evidence.
+- Automatic support for an unregistered or structurally unknown dataset. Adding a dataset requires an explicit repository adapter and parity tests.
+- Adding new proactive cross-modality alignment checks before preprocessing; within-case modality alignment remains a dataset contract.
 
 ---
 
@@ -267,14 +293,20 @@ The resolved config, rather than this top-level preset alone, is the authoritati
 
 ### 7.2 Existing preprocessing
 
-`src/data/loader_stack/isles26_loader.py` currently builds its common transform chain with MONAI `LoadImaged`, `Orientationd`, `Spacingd`, modality processing, channel merging, and `EnsureTyped`. The chain includes the label and the full-volume dataset currently returns tensors in a form optimized for training/evaluation rather than external spatial inversion.
+`src/data/loader_stack/isles24_loader.py` and `src/data/loader_stack/isles26_loader.py` already implement closely related MONAI preprocessing through `LoadImaged`, `Orientationd`, `Spacingd`, shared modality processing, channel merging, padding, and `EnsureTyped`. The dataset registry in `src/data/loader_stack/registry.py` already distinguishes both dataset identities and their supported loader modes. These are the repository's current preprocessing sources of truth.
+
+Both common transform builders currently hardcode `label` into the keys loaded and spatially transformed. The ISLES26 datalist normalization also requires `label` for every record. This reflects the older training/validation-only assumption and must be updated at dataset construction rather than worked around in the GC adapter. `test_flag` already controls train-versus-validation/test partition selection and still returns labels; it must not be repurposed as a label-loading switch.
+
+`MergeProcessedChannelsTransform` removes raw modality keys and their associated metadata after producing the merged `image`. Native metadata must therefore be captured per case and per raw modality before preprocessing begins, and at the latest before that merge removes the source metadata. The full-volume datasets currently return tensors in a form optimized for training/evaluation rather than external spatial inversion.
 
 The transform definition is valuable and must be reused. The problems to solve are:
 
-- make label keys optional;
+- add an explicit, backward-compatible `load_labels: bool = True` dataset-construction contract;
+- make transform keys and datalist validation conditional on that contract, independently of `test_flag`;
 - preserve `MetaTensor` or equivalent transform history;
-- expose original image metadata;
+- expose original image metadata separately for each case and raw modality;
 - separate deterministic preprocessing from training-only random augmentation;
+- route preprocessing by registered `dataset.id` rather than an ISLES26-only branch;
 - provide a tested inverse operation for probability maps.
 
 ### 7.3 Existing prediction execution
@@ -285,7 +317,16 @@ The transform definition is valuable and must be reused. The problems to solve a
 
 `scripts/evaluation/io/model_volumes.py` also calls the same validation inferer for 3D live-model evaluation. It correctly rejects current 3D non-discriminative diffusion because the active diffusion samplers are 2D-shaped.
 
-This is the core extraction opportunity: move the reusable prediction behavior into `src/inference/`, then retain compatibility wrappers where useful.
+Current raw-output ownership is already suitable for an architecture-neutral extraction:
+
+- `src/models/model_factory.py` owns architecture construction/registration for DynUNet, SwinUNETR, and other model types.
+- The DynUNet model adapter may expose stacked deep-supervision logits during training and a single logit tensor during evaluation; the SwinUNETR adapter exposes a single logit tensor.
+- `src/diffusion/discriminative_adapter.py` handles single, list, or stacked discriminative returns generically, selects the final inference head, and applies sigmoid to produce probabilities. It does not branch on a concrete model class.
+- `src/losses/discriminative_deep_supervision.py` owns the corresponding generic training-loss interpretation of single/list/stacked heads.
+
+None of this behavior should move into shared inference. Cut 4 characterizes it and consumes the resulting probability boundary. Architecture-specific construction stays in `src.models`; deep-supervision interpretation and activation stay backend-owned.
+
+This is the core extraction opportunity: characterize and move the reusable prediction behavior into `src/inference/`, then migrate the repository's internal consumers directly. Because no active training jobs require the old inference entrypoint during this transition, Cut 4 removes the inference-specific resolver/builder implementation from `valid_utils.py` rather than retaining two internal paths. Unrelated validation helpers in that module remain in place. Compatibility adapters remain appropriate elsewhere only when an actual historical or external consumer requires them.
 
 ### 7.4 Existing model loading
 
@@ -340,13 +381,21 @@ scripts/gc_submission_builder model build
        |                   |                       |
        +-------------------+-----------------------+
                            |
-Input transport            |          Repository validation data
+Input transport            |          Native validation data
 (/input, inputs.json)       |          (existing dataloaders + labels)
          |                  |                       |
-         v                  v                       v
-Grand Challenge adapter      src/inference     Evaluation/training wrappers
-         |                  shared pipeline               |
-         +------------------+-----------------------------+
+         v                  |                       |
+GC interface manifest      |                       |
+slug -> raw dataset key     |                       |
+         |                  |                       |
+         +------------+-----+-----------------------+
+                      v
+       registered dataset preprocessing adapter
+       selected by saved dataset.id; load_labels explicit
+                      |
+                      v
+                 src/inference
+                shared pipeline
                             |
             +---------------+----------------+
             |                                |
@@ -360,6 +409,9 @@ Grand Challenge adapter      src/inference     Evaluation/training wrappers
 | Concern | Owner | Reason |
 |---|---|---|
 | Model architecture and trained preprocessing | Saved run config | Prevent deployment drift |
+| Deterministic transform construction for a known dataset | Registered adapter in `src/data/loader_stack/` | Reuse the repository's trained preprocessing source of truth for labeled and label-free paths |
+| Label loading | Explicit dataset-construction argument `load_labels` | Preserve labeled defaults while supporting blind inference without coupling behavior to `test_flag` |
+| Per-case native image geometry | Preprocessing request/result contracts | Native restoration cannot rely on a dataset-wide reference geometry |
 | Exact weights | Model artifact archive | Independently replaceable artifact |
 | Model artifact validation, reconstruction, weight loading, and device preparation | `src/models/` | Shared model lifecycle behavior must not depend on inference or evaluation frontends |
 | Output space, precision, sliding-window policy, TTA, ensemble, fixed threshold, postprocessing | Shared `inference` config | One prediction policy across all consumers |
@@ -367,7 +419,7 @@ Grand Challenge adapter      src/inference     Evaluation/training wrappers
 | Case batch, workers, timeout, device and allowed capabilities | `inference_runtime` profile | Location/mode constraints must not duplicate scientific policy |
 | Probability prediction mechanics | `src/inference/` | Shared scientific behavior |
 | Pairing result and reference-label space | Evaluation/training consumers with shared contracts | Metrics are valid only when grids match |
-| `/input`, `/output`, `inputs.json`, socket slugs, HTTP statuses | GC adapter | Platform transport only |
+| `/input`, `/output`, `inputs.json`, socket slugs, slug-to-canonical-key bindings, HTTP statuses | GC adapter and interface manifest | Platform transport only; shared preprocessing sees canonical dataset keys, never slugs |
 | Docker base, system libraries, Python packages, non-root user | GC builder/container | Runtime infrastructure only |
 | SLURM submission | Existing or new runner wrapper | Cluster orchestration only |
 
@@ -381,8 +433,8 @@ src/inference/
   contracts.py              # typed requests/results/traces/capability errors
   policy.py                 # shared inference config parsing and validation
   runtime.py                # execution-profile capabilities and cross-validation
-  preprocessing.py          # label-free/shared deterministic preprocessing
-  predictors.py             # predictor protocol and discriminative implementation
+  preprocessing.py          # dataset-adapter dispatch and typed preprocessing requests/results
+  predictors.py             # architecture-neutral protocol, validation, and backend registration
   sliding_window.py         # MONAI sliding-window orchestration
   augmentation.py           # invertible TTA definitions and de-augmentation
   ensemble.py               # probability-space model/TTA aggregation
@@ -395,6 +447,12 @@ src/models/
   model_config.py           # model/data channel contract helpers moved from training
   checkpoint_loading.py     # existing state-dict extraction/normalization/loading
   model_loader.py           # existing single-model evaluation construction/loading
+
+src/data/loader_stack/
+  registry.py               # registered dataset capabilities and preprocessing-adapter lookup
+  preprocessing.py          # shared deterministic builder/contracts if extraction proves useful
+  isles24_loader.py          # ISLES24 adapter plus existing dataset orchestration
+  isles26_loader.py          # ISLES26 adapter plus existing dataset orchestration
 
 scripts/gc_submission_builder/
   __init__.py
@@ -455,9 +513,16 @@ model, missing_keys, unexpected_keys = load_model(
 )
 predictor = build_probability_predictor(model)
 
+preprocessed = preprocess_case(
+    dataset_id=saved_cfg.dataset.id,
+    raw_modalities=canonical_raw_inputs,
+    dataset_cfg=saved_cfg.dataset,
+    load_labels=False,
+)
+
 result = predict_case(
     predictor=predictor,
-    image_path=input_path,
+    preprocessed_case=preprocessed,
     inference_cfg=cfg.inference,
     runtime_cfg=cfg.inference_runtime,
 )
@@ -465,7 +530,7 @@ result = predict_case(
 
 Model construction, checkpoint loading, and device placement are model-domain operations.
 The inference API begins from prepared predictors and should not know how their
-config and checkpoint paths were discovered. The returned prediction result
+config and checkpoint paths were discovered. Preprocessing begins from canonical raw dataset keys, not GC socket slugs, and dispatches through the adapter registered for the saved `dataset.id`. Its typed `PreprocessedCase` result contains the processed image, case identifier, native metadata, model-space geometry, and spatial trace. When `load_labels=True`, an extended labeled result may additionally expose the jointly transformed model-space label and the original native label; when `load_labels=False`, it contains no dummy, zero, or `None` label field. The returned prediction result
 should distinguish at least:
 
 - the configured primary result in `model_preprocessed` or `native_input` space;
@@ -475,7 +540,7 @@ should distinguish at least:
 - model and policy provenance;
 - timing and memory measurements when instrumentation is enabled.
 
-The predictor-level contract should operate on tensors and return probabilities in `[0, 1]`, with explicit `[B, C, *spatial]` shape semantics. It should not read files, calculate metrics, or write NIfTI outputs.
+The predictor-level contract should operate on tensors and return probabilities in `[0, 1]`, with explicit `[B, C, *spatial]` shape semantics. Backend selection may dispatch through an explicit registered backend family/capability, but never through DynUNet, SwinUNETR, or other model-architecture identities. Backend adapters own raw model-output interpretation, deep-supervision head selection, and activation. Unsupported configured backends fail during predictor preparation, before direct/sliding-window execution. The predictor should not read files, calculate metrics, or write NIfTI outputs.
 
 ### 8.4 Model artifact archive layout and manifest
 
@@ -610,7 +675,29 @@ inference_runtime:
 
 Cross-config validation applies runtime constraints to the requested inference and evaluation configs. It must reject incompatible combinations rather than silently coerce them. Examples include transformed-space output under `gc_submission`, case batch size greater than one, or a label-dependent threshold sweep during `/invoke`.
 
-### 8.7 Validation/evaluation composition
+### 8.7 Interface manifest schema
+
+The concrete parser names may be refined in Cut 10, but the manifest must express this separation explicitly. Fixture slugs are intentionally not canonical modality names:
+
+```yaml
+interface:
+  inputs:
+    - slug: fixture-image-socket
+      dataset_key: T1
+      file_type: nifti
+      required: true
+
+  technical_inputs: []
+
+  output:
+    slug: fixture-segmentation-socket
+    relative_path: segmentation.nii.gz
+    file_type: nifti
+```
+
+The user replaces the fixture values with the phase-published slugs, paths, types, and optional technical inputs. `dataset_key` is selected from the registered adapter's canonical raw keys; it is not derived from `slug`. Model architecture, processed channel names, preprocessing parameters, ROI, threshold, and precision are invalid in this manifest. For the first ISLES26 release, the input binding targets canonical key `T1`; a multimodal registered dataset supplies one binding per required raw modality.
+
+### 8.8 Validation/evaluation composition
 
 Training validation and offline evaluation compose the same top-level `inference` group with their label-dependent policy:
 
@@ -635,7 +722,7 @@ Offline threshold analysis adds an `evaluation.threshold_protocol`. It does not 
 
 For `model_preprocessed` evaluation, prediction is paired with the jointly transformed label. For `native_input` evaluation, prediction is paired with the original native-grid label. The evaluator must validate shape and physical geometry before computing metrics.
 
-### 8.8 Backward compatibility for existing runs
+### 8.9 Backward compatibility for existing runs
 
 Historical saved runs contain prediction settings under `cfg.validation.inference`, including the current representative DynUNet run. They remain valid inputs.
 
@@ -650,24 +737,26 @@ When an explicit top-level inference config exists, values are not merged field-
 
 Legacy translation emits provenance and, eventually, a deprecation warning. It does not rewrite the saved run config on disk.
 
-### 8.9 End-to-end prediction order
+### 8.10 End-to-end prediction order
 
 The canonical operation order is:
 
-1. Validate the input transport and identify exactly one image.
-2. Read image data and native geometry.
-3. Apply deterministic trained preprocessing while retaining an invertible trace.
-4. Execute each allowed TTA view.
-5. Predict patch probabilities using direct or sliding-window inference.
-6. Invert each TTA transform in model space.
-7. Mean-combine TTA and/or model-member probabilities.
-8. If `output_space=native_input`, invert the combined floating-point probability map to the original input grid and validate shape and physical geometry.
-9. If `output_space=model_preprocessed`, retain the combined probability on the model grid and record its model-space geometry.
-10. Threshold in the configured output space.
-11. Apply optional connected-component filtering in that same space; physical-volume filters require valid spacing metadata.
-12. Convert to `uint8` values `{0, 1}` when a binary output is requested.
-13. Return the configured result to the consumer.
-14. For GC transport, write the native result and re-open/validate it before returning success.
+1. Validate the input transport and resolve the active interface manifest.
+2. Map each input socket slug to its declared canonical raw dataset key; reject missing, duplicate, extra, or unknown bindings.
+3. Select the registered preprocessing adapter from the saved model's `dataset.id` and validate that the bound raw keys can produce every saved processed modality.
+4. Read each raw modality and capture that case's native metadata before any preprocessing or channel merge. Modalities within the case are trusted to satisfy the dataset alignment contract; this CAP adds no separate alignment precheck.
+5. Apply deterministic trained preprocessing with explicit `load_labels` behavior while retaining an invertible trace.
+6. Execute each allowed TTA view.
+7. Predict probabilities using direct inference or, for sliding-window inference, make the backend predictor produce a probability for every window before MONAI blends overlapping windows. Probability-before-blending is the parity-preserving baseline; blending logits and applying an activation afterward is a separate future experimental policy, not an implicit refactor.
+8. Invert each TTA transform in model space.
+9. Mean-combine TTA and/or model-member probabilities.
+10. If `output_space=native_input`, invert the combined floating-point probability map to the selected native reference grid and validate shape and physical geometry.
+11. If `output_space=model_preprocessed`, retain the combined probability on the model grid and record its model-space geometry.
+12. Threshold in the configured output space.
+13. Apply optional connected-component filtering in that same space; physical-volume filters require valid spacing metadata.
+14. Convert to `uint8` values `{0, 1}` when a binary output is requested.
+15. Return the configured result to the consumer.
+16. For GC transport, write the native result to the configured output binding and re-open/validate it before returning success.
 
 Whenever spatial inversion occurs, probability interpolation must happen before thresholding. Interpolating an already binary mask can introduce avoidable geometric and topological artifacts.
 
@@ -682,6 +771,7 @@ Whenever spatial inversion occurs, probability interpolation must happen before 
 - input and output channel counts;
 - deep-supervision topology;
 - trained modality selection;
+- dataset identity and canonical raw-to-processed modality contract;
 - trained intensity preprocessing;
 - trained orientation and spacing transforms;
 - default/model-compatible ROI size;
@@ -689,7 +779,19 @@ Whenever spatial inversion occurs, probability interpolation must happen before 
 
 The complete saved config remains packaged for provenance and construction compatibility. Its historical validation/inference settings are inactive when a current explicit `cfg.inference` is selected.
 
-### 9.2 Inference policy owns
+### 9.2 Dataset construction and preprocessing adapters own
+
+- whether labels are loaded for a dataset instance, through explicit `load_labels: bool = True`;
+- label-conditional datalist requirements and MONAI transform keys;
+- deterministic spatial and intensity transform assembly from the saved dataset config;
+- dataset-specific raw-to-processed modality production;
+- per-case native metadata capture before transformations discard raw keys;
+- deterministic selection of the canonical raw modality whose native grid is the output reference when a dataset has multiple aligned inputs;
+- label-required training augmentation checks.
+
+`test_flag` remains an independent partition-selection input. It must not set `load_labels`, and `load_labels` must not change partition selection. Existing labeled training, validation, and repository-model evaluation retain the default. Blind native inference and GC inference explicitly pass `False`.
+
+### 9.3 Inference policy owns
 
 - configured result/output space;
 - numerical precision;
@@ -700,7 +802,7 @@ The complete saved config remains packaged for provenance and construction compa
 - postprocessing;
 - optional intermediate artifact retention, subject to runtime permission.
 
-### 9.3 Validation/evaluation config owns
+### 9.4 Validation/evaluation config owns
 
 - reference-label access and pairing;
 - metric selection and aggregation;
@@ -711,7 +813,7 @@ The complete saved config remains packaged for provenance and construction compa
 
 It does not define a second sliding-window, TTA, ensemble, output-space, or fixed deployment-threshold schema.
 
-### 9.4 Inference runtime profile owns
+### 9.5 Inference runtime profile owns
 
 - execution profile name (`native`, `gc_container_test`, or `gc_submission`);
 - case batch and worker limits;
@@ -723,7 +825,7 @@ It does not define a second sliding-window, TTA, ensemble, output-space, or fixe
 
 The runtime profile constrains requested behavior. It must not change model architecture, trained preprocessing, or silently rewrite inference choices.
 
-### 9.5 Builder config owns
+### 9.6 Builder config owns
 
 - image tag and output archive names;
 - Docker build context;
@@ -736,17 +838,18 @@ The runtime profile constrains requested behavior. It must not change model arch
 
 Builder config must not contain DynUNet channels, strides, model image size, input modality count, or trained preprocessing values.
 
-### 9.6 Interface manifest owns
+### 9.7 Interface manifest owns
 
 - socket slugs;
+- explicit input socket-slug to canonical raw dataset-key bindings;
 - input and output relative paths;
 - transport file types;
-- optional JSON input presence;
+- optional technical-JSON socket bindings and whether they are required;
 - platform interface dispatch key.
 
-It must not contain model architecture or inference-policy settings.
+It must not contain model architecture, processed modality definitions, trained preprocessing, or inference-policy settings. Runtime validation compares its canonical raw keys with the selected registered adapter and saved model contract; shared preprocessing receives only the canonical mapping and never a socket slug.
 
-### 9.7 Why this is shared inference composition, not one monolithic validation class
+### 9.8 Why this is shared inference composition, not one monolithic validation class
 
 The overlap identified between existing validation configs and proposed GC inference is real: both need the same sliding-window, precision, TTA, ensemble, output-space, fixed-threshold, and postprocessing semantics. Duplicating those fields would recreate the drift this refactor is intended to remove.
 
@@ -764,7 +867,7 @@ consumer assessment/interface policy
 runtime capability profile
 ```
 
-This permits ordinary validation and container diagnostics in either valid result space without allowing evaluation-only behavior to leak into the submission endpoint.
+This permits native validation and container diagnostics in either valid result space without allowing evaluation-only behavior to leak into the submission endpoint.
 
 ---
 
@@ -773,17 +876,21 @@ This permits ordinary validation and container diagnostics in either valid resul
 | Existing component | Required relationship to new package | Scope of change |
 |---|---|---|
 | `configs/validation/*.yaml` | Split prediction from assessment policy | Move new prediction settings to `configs/inference/`; retain metrics/cadence/checkpoint concerns under validation |
-| new `configs/inference/*.yaml` | Shared prediction policy | Compose from training validation, evaluation, local inference, container diagnostics, and GC deployment |
-| new `configs/inference_runtime/*.yaml` | Execution capability profiles | Enforce native-Python/container/submission constraints without duplicating inference settings |
-| `src/data/loader_stack/isles26_loader.py` | Share deterministic preprocessing builder | Extract reusable image-only/image-label transforms; retain training augmentation behavior |
-| `src/utils/valid_utils.py` | Compatibility façade and legacy config translator | Delegate prediction/sliding-window construction to `src/inference`; translate historical `validation.inference` when no explicit top-level policy exists |
-| `src/training/trainer.py::validate_one_epoch` | Shared predictor/config consumer | Compose top-level inference plus native runtime; retain labels, metrics, progress, cadence, and logging |
+| `configs/inference/*.yaml` | Shared prediction policy | Compose from training validation, evaluation, native inference, container diagnostics, and GC deployment |
+| `configs/inference_runtime/*.yaml` | Execution capability profiles | Enforce native-Python/container/submission constraints without duplicating inference settings |
+| `src/data/loader_stack/registry.py` and contracts/factory routing | Register preprocessing capabilities | Select an implemented adapter by saved `dataset.id`; reject unknown/unimplemented dataset preprocessing clearly |
+| `src/data/loader_stack/isles24_loader.py` | Share deterministic preprocessing and make labels explicit | Add backward-compatible `load_labels=True`, dynamic transform keys, metadata capture, and parity-preserving ISLES24 adapter behavior |
+| `src/data/loader_stack/isles26_loader.py` | Share deterministic preprocessing and make labels explicit | Remove the unconditional label assumption through `load_labels=True`, dynamic datalist/transform keys, metadata capture, and parity-preserving ISLES26 adapter behavior |
+| shared modality transforms, including `MergeProcessedChannelsTransform` | Preserve preprocessing semantics and metadata boundary | Capture native metadata before raw keys/meta are removed; do not duplicate modality processing in the container |
+| `src/inference/preprocessing.py` and contracts | Dataset-agnostic preprocessing consumer | Dispatch canonical raw-key inputs to the registered adapter and return typed label-free or labeled case results |
+| `src/utils/valid_utils.py` | Source of the legacy inferer implementation, not its permanent façade | In Cut 4, transfer/remove only inference-policy resolution and direct/sliding-window prediction helpers; retain unrelated validation, memory, parallel, and generative utilities. Legacy config translation belongs in `src/inference.policy` |
+| `src/training/trainer.py::validate_one_epoch` | Direct shared predictor/config consumer | In Cut 4, migrate its probability-generation call directly to `src.inference`; in Cut 6, finish config composition and certify labels, metrics, progress, cadence, logging, and checkpoint behavior |
 | `src/utils/train_utils.py` | Transfer model-owned channel helpers | Import the unchanged helpers from `src/models/model_config.py`; keep the DP/DDP training builder in place |
 | `src/training/checkpoint_utils.py` | Compatibility facade for moved loading helpers | Re-export the unchanged checkpoint-to-model helpers from `src/models/checkpoint_loading.py`; preserve resume behavior |
-| `src/diffusion/discriminative_adapter.py` | First predictor backend dependency | Reuse final-head/probability behavior; validate output-domain contract |
+| `src/diffusion/discriminative_adapter.py` | First predictor backend implementation/dependency | Retain backend-owned single/list/stacked-head interpretation, final-head selection, and sigmoid behavior; expose finite `[B, C, *spatial]` probabilities to the shared contract without architecture-name branching in `src.inference` |
 | `src/utils/ensemble.py` | Selective reuse/migration | Mean is eligible; soft STAPLE remains disabled for 3D until generalized |
 | `scripts/evaluation/core/model_loader.py` | Delegate common model construction/loading to `src/models/` | Preserve evaluation checkpoint CLI behavior and run-directory discovery while removing duplicated model lifecycle behavior |
-| `scripts/evaluation/io/model_volumes.py` | Shared predictor/config consumer | Retain volume sample identity/metadata; route model/native result space and matching label space explicitly |
+| `scripts/evaluation/io/model_volumes.py` | Direct shared predictor/config consumer | In Cut 4, migrate model-space probability generation directly; in Cut 5, retain volume identity/metadata and complete explicit result/reference-space and evaluation provenance integration |
 | `scripts/evaluation/core/evaluation_pipeline.py` | Assessment consumer | Continue metrics, threshold protocols, reports, and provenance; validate prediction/reference geometry |
 | `scripts/analysis/threshold_analysis.py` | Legacy migration/deprecation | Do not extend independently; later delegate or retire after parity |
 | `scripts/test_validation_memory.py` | Replace or delegate | Convert to shared predictor resource smoke test or supersede with GC benchmark |
@@ -804,18 +911,26 @@ Every implementation cut must preserve these invariants where applicable:
 3. **Separate assessment policy:** metrics and threshold sweeps remain in validation/evaluation config and never become implicit deployment behavior.
 4. **Runtime capability enforcement:** incompatible inference/evaluation/runtime combinations fail rather than being silently changed.
 5. **Probability contract:** predictor outputs finite probabilities in `[0, 1]` with `[B, C, *spatial]` shape.
-6. **Result-space contract:** every result declares `model_preprocessed` or `native_input`; every metric pairs prediction and reference in the same verified space.
-7. **GC spatial contract:** production GC output is always `native_input` and matches input shape and physical geometry.
-8. **Case batch invariant:** case batch size is one under `gc_submission`.
-9. **Strict release loading:** the eventual release gate must reject missing/unexpected state-dict keys. The transition cut does not change the established permissive training/evaluation behavior.
-10. **Explicit policy precedence:** top-level `cfg.inference` replaces rather than field-merges with historical `cfg.validation.inference`.
-11. **No hidden fallback:** unsupported TTA, ensemble, precision, model family, output space, or interface fails clearly.
-12. **No label dependency:** deployment preprocessing accepts an image without a label.
-13. **No network runtime:** all required files and packages are inside the image or model mount.
-14. **No multiprocessing dependency:** production case loading runs in-process; no DataLoader worker pool is necessary.
-15. **Independent artifacts:** the Docker image can be rebuilt without model weights, and the model artifact archive can be rebuilt without changing the image.
-16. **Reproducible provenance:** code, runtime, saved config, active inference config, runtime profile, and weights are hashable and recorded.
-17. **Enhancements are opt-in:** baseline inference remains available when TTA, ensembling, and component filtering are disabled.
+6. **Backend-owned output interpretation:** raw model-output parsing, deep-supervision head selection, and activation remain behind the predictor adapter; shared inference contains no architecture-name branching.
+7. **Probability-before-blending parity:** the initial sliding-window path predicts a probability for each window and blends those probabilities. Logit blending is not introduced without an explicit, separately validated policy.
+8. **Result-space contract:** every result declares `model_preprocessed` or `native_input`; every metric pairs prediction and reference in the same verified space.
+9. **GC spatial contract:** production GC output is always `native_input` and matches input shape and physical geometry.
+10. **Case batch invariant:** case batch size is one under `gc_submission`.
+11. **Strict release loading:** the eventual release gate must reject missing/unexpected state-dict keys. The transition cut does not change the established permissive training/evaluation behavior.
+12. **Explicit policy precedence:** top-level `cfg.inference` replaces rather than field-merges with historical `cfg.validation.inference`.
+13. **No hidden fallback:** unsupported TTA, ensemble, precision, model family, output space, or interface fails clearly.
+14. **No label dependency:** deployment preprocessing accepts an image without a label.
+15. **No network runtime:** all required files and packages are inside the image or model mount.
+16. **No multiprocessing dependency:** production case loading runs in-process; no DataLoader worker pool is necessary.
+17. **Independent artifacts:** the Docker image can be rebuilt without model weights, and the model artifact archive can be rebuilt without changing the image.
+18. **Reproducible provenance:** code, runtime, saved config, active inference config, runtime profile, and weights are hashable and recorded.
+19. **Enhancements are opt-in:** baseline inference remains available when TTA, ensembling, and component filtering are disabled.
+20. **Registered dataset dispatch:** saved `dataset.id` selects preprocessing. An unregistered adapter fails clearly; no container code hardcodes ISLES26 transforms.
+21. **Explicit label contract:** `load_labels=True` is backward compatible, `False` is label-free, and `test_flag` never controls label behavior.
+22. **No synthetic labels:** blind inference returns a typed label-free case, not a dummy tensor or placeholder label.
+23. **Per-case geometry:** native metadata is captured for every case before preprocessing/channel merging; no dataset-wide geometry is assumed.
+24. **Within-case alignment contract:** raw modalities within a case are expected aligned. This CAP does not introduce an additional pre-preprocessing alignment check.
+25. **Transport isolation:** interface manifests map arbitrary socket slugs to canonical dataset keys; core inference and preprocessing never depend on competition slug names.
 
 ---
 
@@ -943,7 +1058,7 @@ Cut 0 baseline records.
 - Production GC rejects model-space output, case batch sizes other than one, threshold sweeps, ground truth, and intermediate artifact retention.
 - Cross-config validation leaves valid requested values unchanged.
 - Predictor output validation rejects logits outside the declared probability contract, NaN/Inf values, wrong ranks, and incorrect channels.
-- Capability errors clearly explain that current 3D non-discriminative diffusion is unsupported.
+- Capability errors clearly explain that the initial shared backend is discriminative-only; Cut 4 extends the message with the future `ProbabilityPredictor` adapter-registration hook. Existing diffusion model/training code outside this shared predictor boundary is not removed.
 
 ### Acceptance criteria
 
@@ -1020,11 +1135,15 @@ Restore evaluation and training imports to their previous local implementations;
 
 ---
 
-## 15. Cut 3: Extract deterministic, label-optional preprocessing
+## 15. Cut 3: Extract dataset-agnostic deterministic, label-optional preprocessing
 
 ### Context
 
-The existing ISLES26 loader contains the trained preprocessing contract but assumes labels in its common transform chain. Copying those transforms into the container would create two sources of truth. The extracted implementation must serve both labeled repository data and unlabeled external input.
+The existing ISLES24 and ISLES26 loaders contain the trained preprocessing contracts, share modality-processing primitives, and are already selected through the loader-stack registry. Both common transform chains nevertheless hardcode a label because they were designed when every training/validation record was labeled. ISLES26 datalist validation likewise unconditionally requires a label. Blind native inference and Grand Challenge invocation make that assumption obsolete.
+
+This cut updates the assumption at dataset construction instead of adding a container-only workaround. It establishes explicit `load_labels` behavior, extracts or exposes each registered dataset's deterministic transform assembly, and lets `src/inference` select the correct adapter from the saved model's `dataset.id`. The first adapters are ISLES24 and ISLES26; the release model remains ISLES26 3D DynUNet, but shared infrastructure is not allowed to branch on the competition name.
+
+Spatial restoration is not implemented here, but its source evidence must survive. Native metadata is case-specific and must be captured before preprocessing begins and before `MergeProcessedChannelsTransform` removes raw modality keys/meta. Different cases may have unrelated shapes, spacings, orientations, and affines. Within a case, the dataset contract says its modalities are aligned; this cut deliberately does not introduce an additional pre-preprocessing alignment validator.
 
 ### Dependencies
 
@@ -1032,60 +1151,98 @@ Cuts 0-2.
 
 ### Affected files and components
 
+- `src/data/loader_stack/registry.py`
+- `src/data/loader_stack/contracts.py`
+- `src/data/loader_stack/factory.py` and the `src/data/loaders.py` compatibility facade where constructor arguments are routed
+- `src/data/loader_stack/isles24_loader.py`
 - `src/data/loader_stack/isles26_loader.py`
-- possibly a new shared module such as `src/data/loader_stack/isles26_transforms.py`
+- `src/utils/loader_transforms.py` only if metadata preservation requires a shared transform-boundary change
+- optionally one dataset-neutral helper under `src/data/loader_stack/` for deterministic transform assembly, native metadata capture, and/or typed adapter registration
 - new `src/inference/preprocessing.py`
 - `src/inference/contracts.py`
-- existing ISLES26 loader tests
+- existing ISLES24 and ISLES26 full-volume, 2D, random-patch, datalist, facade-routing, and registry tests
 - new `tests/test_inference_preprocessing.py`
 
 ### Desired changes
 
-1. Extract the deterministic spatial and intensity transform construction from the dataset-specific orchestration.
-2. Allow callers to specify image-only or image-plus-label keys.
-3. Ensure random training augmentation remains outside the deployment preprocessing path.
-4. Preserve MONAI `MetaTensor` metadata and invertible transform history, or define an equivalent explicit trace if a MONAI transform is not invertible.
-5. Record original:
-   - array shape;
-   - affine;
-   - voxel spacing;
+1. Add `load_labels: bool = True` at dataset construction and thread it through loader-stack/facade routing. The default preserves every existing labeled caller. Declare `load_labels: true` explicitly in the current ISLES24 and ISLES26 base dataset configs; historical resolved model configs that predate the field continue to use the backward-compatible `True` runtime default.
+2. Keep `test_flag` semantically independent. It continues to select the existing train/validation/test partition behavior and must neither derive nor override `load_labels`. `is_training` continues to control augmentation rather than label presence.
+3. Make datalist normalization conditional:
+   - with `load_labels=True`, a missing label remains an informative error;
+   - with `load_labels=False`, a record may omit `label`, and a supplied label is not silently loaded.
+4. Build MONAI key lists dynamically for `LoadImaged`, `Orientationd`, `Spacingd`, `SpatialPadd`, and `EnsureTyped`. Use nearest-neighbor label interpolation only when a label is loaded. Image processing must be numerically identical in labeled and label-free modes.
+5. Keep label-dependent random-patch operations, including `RandCropByPosNegLabeld`, explicitly label-required. A random-patch dataset requested with `load_labels=False` fails immediately with an informative specialized error rather than constructing a partially valid pipeline.
+6. Extract or expose deterministic transform assembly without moving dataset-specific scientific choices into `src/inference`. Shared modality processing remains shared; ISLES24- and ISLES26-specific rules remain in their registered adapters.
+7. Extend registry capabilities so the saved `dataset.id` resolves an implemented preprocessing adapter. Unknown or registered-but-unimplemented preprocessing fails clearly. Do not infer the adapter from a path, modality name, or competition slug.
+8. Resolve saved processed modalities through the adapter's canonical raw-to-processed modality contract. One raw modality may produce multiple processed channels; the saved `dataset.modalities` and preprocessing config remain authoritative.
+9. Capture native metadata before deterministic preprocessing starts, separately for each case and raw modality:
+   - canonical raw modality key and safe source provenance;
+   - array shape and source dtype;
+   - affine and voxel spacing;
    - orientation codes;
-   - qform/sform information where available;
-   - source dtype.
-6. Preserve the exact trained intensity operations from the resolved config.
-7. Validate finite input values and expected single-modality/channel semantics.
-8. Ensure the full-volume repository loader can continue returning its existing tuple contract unless metadata return is explicitly requested.
-9. Do not use a DataLoader worker pool for the external single-file inference path.
-10. Make both the jointly transformed label and original native label/metadata available to evaluation when their corresponding output space is requested, without changing the default training tuple unnecessarily.
+   - qform and sform values plus codes where available.
+10. Let the registered adapter select a deterministic canonical raw modality as the native output reference, then retain that reference geometry, model-space geometry, MONAI transform history, and any explicit non-MONAI trace required by Cut 7. Because within-case inputs are contractually aligned, this selection does not add geometry-comparison checks. Do not implement probability inversion in this cut.
+11. Trust the established within-case modality-alignment contract. Do not add new shape/affine/spacing/world-coordinate comparisons between raw modalities before preprocessing.
+12. Preserve the exact trained orientation, spacing, intensity, modality-processing, channel-order, and padding behavior from the resolved saved config.
+13. Preserve the default labeled item/tuple contract, including `(image, label, case_id)` where currently exposed. Do not force existing training or evaluation callers to consume a new object merely to gain blind inference support.
+14. Define an explicit typed `PreprocessedCase` for label-free/shared inference with processed image, case ID, native metadata, model-space geometry, and spatial trace. Do not fabricate a zero label or expose a dummy/`None` label field.
+15. Permit an extended labeled result, requested explicitly by evaluation, to expose both the jointly transformed model-space label and original native label/geometry. The predictor remains label-free regardless of which preprocessing result was used.
+16. Do not use a DataLoader worker pool for the external single-case inference path.
+17. Keep Grand Challenge socket/path parsing out of this cut. `src/inference.preprocessing` receives canonical raw modality keys after the transport adapter has applied its user-supplied interface bindings.
 
 ### Expected tests and testing components
 
-- Image-plus-label preprocessing remains numerically equivalent to the current loader for fixed deterministic settings.
-- Image-only preprocessing returns the same image tensor as image-plus-label preprocessing.
-- Model-space output can be paired with the jointly transformed label, while native-space output can be paired with an original-grid label whose geometry is verified.
-- No label path is required in deployment mode.
-- All spatial fixture variants retain an invertible trace.
-- Training random-patch and augmentation tests remain green.
-- ISLES26 2D and 3D loader routing tests remain green.
-- Input with wrong modality count, corrupt NIfTI, nonfinite-only data, or unsupported rank fails clearly.
+- ISLES24 and ISLES26 image-plus-label preprocessing remain numerically equivalent to the pre-cut loaders for fixed deterministic settings.
+- For the same record and config, `load_labels=False` produces the same processed image tensor as `load_labels=True`.
+- Omitting `load_labels` preserves the labeled default and rejects a missing label with a dataset/case-specific message.
+- A missing label succeeds only when `load_labels=False`; a present label is not returned or transformed in that mode.
+- `test_flag=True, load_labels=True` remains labeled, and tests prove that changing either flag never implicitly changes the other.
+- Image-only transform chains contain no label keys and do not request label interpolation or label typing.
+- Label-dependent random-patch construction with `load_labels=False` fails before iteration with an informative error.
+- Registry tests route saved `dataset.id=isles24` and `dataset.id=isles26` to their respective preprocessing adapters; unknown/unimplemented adapters fail clearly.
+- One raw modality producing multiple configured processed channels retains the saved channel order and numerical behavior.
+- Two fixture cases with deliberately different native geometries each retain their own shape, affine, spacing, orientation, qform/sform, and dtype metadata.
+- Tests prove native metadata is captured before raw modality keys/meta are removed by channel merging.
+- All supported spatial fixtures retain a trace sufficient for later inversion, without claiming that inversion is already implemented.
+- Explicit labeled results make the jointly transformed label and original native label/geometry available for later same-space evaluation.
+- Existing ISLES24/ISLES26 2D, 3D, full-volume, random-patch, datalist, and facade-routing tests remain green.
+- Input with wrong modality count, corrupt NIfTI, invalid/nonfinite data, unsupported rank, or an unavailable adapter fails clearly.
+- No new test asserts proactive within-case cross-modality alignment validation; that behavior is intentionally out of scope.
 
 ### Acceptance criteria
 
-- Existing training/evaluation datasets and external inference share one deterministic transform definition.
-- The deployment path retains sufficient information for exact native-grid restoration.
+- Existing training/evaluation datasets and external inference share the registered dataset's deterministic transform definition.
+- Dataset selection comes from the saved `dataset.id`; neither `src/inference` nor the GC runtime hardcodes ISLES26 preprocessing.
+- `load_labels=True` preserves legacy callers, `load_labels=False` supports blind inference without placeholders, and `test_flag` remains independent.
+- The deployment path retains per-case information sufficient for exact native-grid restoration in Cut 7.
 - No training augmentation is accidentally applied during inference.
 
 ### Rollback
 
-Keep the extracted builder behind the existing loader API. If parity fails, restore the inlined loader transform builder while retaining failing fixtures for investigation.
+Keep extracted builders/adapters behind the existing loader API. If parity fails, restore the inlined deterministic builder while retaining the explicit `load_labels` contract, metadata fixtures, and failing parity cases for investigation. Do not replace the update with a GC-only preprocessing copy.
+
+### Explicit non-goals for this cut
+
+- Prediction, sliding-window execution, or activation handling (Cut 4).
+- Probability inversion or native-output writing (Cut 7).
+- Socket-slug discovery, `inputs.json` parsing, or output path dispatch (Cut 10).
+- TTA, ensembling, threshold calibration, or postprocessing (Cut 8).
+- Automatic support for datasets without a registered, tested adapter.
+- New within-case raw-modality alignment checks.
 
 ---
 
-## 16. Cut 4: Discriminative probability predictor and sliding-window execution
+## 16. Cut 4: Backend-neutral probability prediction with the initial discriminative backend
 
 ### Context
 
-`src/utils/valid_utils.py` currently combines validation policy resolution with prediction execution. The new package must own direct and sliding-window probability generation while reproducing current behavior.
+`src/utils/valid_utils.py` currently combines validation-policy resolution with direct/sliding-window prediction execution. `src/training/trainer.py::validate_one_epoch()` and `scripts/evaluation/io/model_volumes.py` consume that implementation. Cut 4 transfers this reusable probability-generation behavior into `src/inference/` and migrates those internal consumers directly; it does not preserve `build_validation_inferer()` as a second façade because there are no active training jobs that require an intermediate migration window.
+
+The shared layer must be backend- and architecture-neutral. Its input is an injected `ProbabilityPredictor` that returns finite `[B, C, *spatial]` probabilities. Interpretation of raw model returns—including single versus list/stacked deep-supervision outputs, final-head selection, and sigmoid or any future backend-specific normalization—remains owned by the backend adapter. Existing `DynUNetAdapter`/`SwinUNETRAdapter` and `DiscriminativeAdapter` behavior is characterized rather than reimplemented inside inference.
+
+Current sliding-window behavior asks the discriminative adapter for a probability on every patch and then lets MONAI blend those probabilities. This is a valid, parity-critical baseline rather than an identified bug. Cut 4 preserves it. A possible logits-first blend would be a separately configured and scientifically evaluated future experiment.
+
+The package boundary is deliberately capable of receiving a future diffusion-backed `ProbabilityPredictor`, but this cut registers only the discriminative backend. Unsupported generative configurations must fail before direct/window execution with an actionable capability error that names the future predictor-adapter extension point.
 
 ### Dependencies
 
@@ -1093,58 +1250,74 @@ Cuts 0-3.
 
 ### Affected files and components
 
-- new `src/inference/predictors.py`
+- existing `src/inference/predictors.py`, extended with the executable predictor boundary and discriminative registration/construction
 - new `src/inference/sliding_window.py`
-- new `src/inference/pipeline.py`
+- `src/inference/pipeline.py` only if a small coordinator is needed to keep direct/sliding-window policy execution out of consumers; do not create an empty pass-through layer
 - `src/inference/policy.py`
 - `src/inference/runtime.py`
-- `src/utils/valid_utils.py`
-- `src/diffusion/discriminative_adapter.py`
+- `src/utils/valid_utils.py`, removing only its inference-specific resolver/builder functions and imports while retaining unrelated validation utilities
+- `src/training/trainer.py::validate_one_epoch`
+- `scripts/evaluation/io/model_volumes.py`
+- `src/diffusion/discriminative_adapter.py`, only for the minimal generic predictor boundary if required; do not move or duplicate its output parser
+- existing model adapters and `src/losses/discriminative_deep_supervision.py` as characterized backend-owned behavior, not inference-package migration targets
 - `configs/validation/sliding_window.yaml` as a legacy input and migration target
-- new `tests/test_inference_discriminative_predictor.py`
+- new or extended `tests/test_inference_discriminative_predictor.py`
 - new `tests/test_inference_sliding_window.py`
-- existing validation inferer tests
+- existing validation-inferer, trainer-validation, and model-volume evaluation tests, migrated to the new direct boundary
 
 ### Desired changes
 
-1. Implement direct 3D discriminative prediction returning final-head probabilities.
-2. Preserve DynUNet deep-supervision semantics: training may return multiple heads, but inference uses only the correct final output.
-3. Resolve direct/sliding-window behavior exclusively from the active shared `cfg.inference` after legacy translation.
-4. Implement MONAI sliding-window execution with explicit:
+1. Make direct and sliding-window execution consume the architecture-neutral `ProbabilityPredictor` protocol from Cut 1 rather than a concrete architecture or diffusion object.
+2. Register/build the current discriminative probability backend as the first supported implementation. Keep raw-output interpretation, deep-supervision parsing/final-head selection, and activation inside the existing backend/model-adapter layer.
+3. Keep `src.inference` free of DynUNet, SwinUNETR, or other model-class/name branches. It validates only the predictor's declared tensor rank, channels, finiteness, and probability domain.
+4. Resolve direct/sliding-window behavior exclusively from the active shared `cfg.inference` after legacy translation.
+5. Implement MONAI sliding-window execution with only the established repository parameters:
    - ROI resolution;
    - `sw_batch_size`;
    - overlap;
    - blend mode;
    - padding mode;
    - progress callback optionality.
-5. Set GC deployment default `sw_batch_size=1` through the explicit GC inference policy; do not inherit a larger historical training validation override.
-6. Run under `torch.inference_mode()` and selected autocast precision.
-7. Validate probability domain after prediction.
-8. Keep progress/UI concerns injectable so the Docker service does not emit per-window progress bars.
-9. Turn `src/utils/valid_utils.py::build_validation_inferer()` into a compatibility wrapper around the new implementation.
-10. Translate legacy `cfg.validation.inference` only when no explicit `cfg.inference` is supplied and record which source won.
+6. Preserve the established aggregation order: invoke the probability predictor separately for each window, then blend overlapping window probabilities using the configured `blend_mode`; preserve the configured `padding_mode` for window-edge/input padding. Do not introduce logits-first blending or additional unestablished MONAI policy fields.
+7. Set the GC-safe `sw_batch_size=1` through the explicitly selected inference policy; do not inherit a larger historical training-validation override.
+8. Run under `torch.inference_mode()` and the selected precision/autocast policy, and validate the probability contract after direct prediction and after sliding-window aggregation.
+9. Keep progress/UI concerns injectable so the Docker service does not emit per-window progress bars.
+10. Reject unsupported generative/diffusion configurations at the shared predictor boundary with `UnsupportedModelError` before allocating or executing inference windows. The message must identify implementation/registration of a backend adapter satisfying `src.inference.contracts.ProbabilityPredictor` as the extension point; `src.inference` must not import DDPM/DDIM/OpenAI diffusion sampling logic in this cut. This capability rejection does not remove diffusion model construction, training-forward, checkpoint, or training-specific snapshot code elsewhere in the repository.
+11. Remove `_resolve_validation_inference_mode`, `should_use_sliding_window_validation`, `resolve_validation_sliding_window_roi`, `build_validation_inferer`, and inference-only parsing helpers/imports from `src/utils/valid_utils.py`. Preserve its unrelated model-copy, memory, parallel-validation, and generative-validation utilities.
+12. Migrate all repository call sites of the removed inferer directly to `src.inference`, including training validation and live-model evaluation. `scripts/test_validation_memory.py` does not call this inferer and remains outside Cut 4; its unrelated multi-GPU/generative validation helpers remain in `valid_utils.py`. No internal compatibility façade remains.
+13. Translate legacy `cfg.validation.inference` only when no explicit `cfg.inference` is supplied and record which source won.
+14. Return model/preprocessed-space probabilities only in this cut. If the Cut 4 entrypoint receives `output_space=native_input` before Cut 7 is integrated, it must fail with an explicit unsupported-capability error rather than relabel a model-space tensor. Do not threshold predictions, calculate metrics, handle labels, write NIfTI, or add GC socket behavior; those remain later-cut or consumer responsibilities.
 
 ### Expected tests and testing components
 
+- A generic mock `ProbabilityPredictor` exercises direct and sliding-window paths without importing or naming a model architecture.
 - Direct output matches the current discriminative adapter on fixed tensors.
 - Sliding-window output matches the current validation inferer within the Cut 0 tolerance.
+- A regression test proves that patch probabilities are produced before overlap blending; no hidden logits-then-activation reorder occurs.
 - Explicit `cfg.inference` takes precedence as a complete policy over historical `cfg.validation.inference`; there is no field-level leakage.
 - Odd input sizes and inputs smaller than the ROI are padded/cropped correctly.
 - Window batch one works under FP32 and FP16 on GPU.
-- Deep-supervision training and evaluation output ranks are handled correctly.
+- Existing backend/model-adapter tests continue to cover single, list, and stacked deep-supervision returns and final-head selection; shared inference tests assert only the normalized probability boundary.
+- A configured generative backend fails before prediction/window execution with an informative `UnsupportedModelError` naming `ProbabilityPredictor` adapter registration as the future hook.
 - NaN/Inf or out-of-domain output fails.
-- Existing `test_valid_utils` and model-volume evaluation tests remain green.
+- Trainer-validation, model-volume evaluation, and relevant former `test_valid_utils` behavior tests use the direct shared entrypoint and remain green.
+- Repository search confirms that no consumer imports or calls `build_validation_inferer` and that the removed inference symbols no longer exist in `valid_utils.py`.
 - Selected real-case probability parity passes.
 
 ### Acceptance criteria
 
-- Training and evaluation can call the new predictor through the compatibility façade without metric drift.
+- Training validation and live-model evaluation call the same `src.inference` probability path directly without metric drift.
+- `src/utils/valid_utils.py` no longer owns or re-exports inference-policy resolution or direct/sliding-window construction; its unrelated functionality remains intact.
+- Shared inference contains no architecture-name branching, raw-output/deep-supervision interpretation, or activation choice.
+- Sliding-window aggregation preserves probability-before-blending parity with the accepted baseline.
+- The initial discriminative backend is supported and configured generative inference fails early with the documented future adapter hook.
 - The predictor contains no label, metric, NIfTI-writing, or socket logic.
 - The T4-safe window-batch default is enforced by deployment policy.
+- Cut 4 results are truthfully identified as model/preprocessed-space probabilities; native restoration remains Cut 7.
 
 ### Rollback
 
-Restore the previous body of `build_validation_inferer()` and leave the new predictor isolated until parity issues are resolved.
+If parity cannot be established, atomically restore the old inference-specific `valid_utils.py` implementation and its direct call sites while keeping the new shared implementation isolated. Do not leave both implementations active or partially route consumers between them.
 
 ---
 
@@ -1152,11 +1325,11 @@ Restore the previous body of `build_validation_inferer()` and leave the new pred
 
 ### Context
 
-Offline evaluation is the scientific certification surface for deployment behavior. It must use the shared predictor and shared inference config before the container is trusted, while retaining its current command-line interface, label handling, metrics, threshold analysis, and reports. It must also make model-space parity evaluation and native-space deployment certification explicit rather than conflating them.
+Offline evaluation is the scientific certification surface for deployment behavior. Cut 4 has already routed live-model, model-space probability generation in `model_volumes.py` directly through the shared predictor. Cut 5 completes the evaluation integration around that accepted path: shared config composition, result/reference-space ownership, labels, metrics, threshold protocols, provenance, and reports. It must retain the current command-line interface and make model-space parity evaluation and native-space deployment certification explicit rather than conflating them.
 
 ### Dependencies
 
-Cuts 0-4.
+Cuts 0-4. Model-space evaluation integration can complete immediately. Native-space evaluation assertions depend on the Cut 7 restoration contract and may be finalized when that parallel cut lands.
 
 ### Affected files and components
 
@@ -1175,8 +1348,8 @@ Cuts 0-4.
 
 ### Desired changes
 
-1. Replace evaluation-owned model construction with `src.models` calls and prediction mechanics with `src.inference` calls.
-2. Continue obtaining images, labels, case IDs, and evaluation metadata through existing dataloaders.
+1. Replace any remaining evaluation-owned model construction with `src.models` calls. Retain the direct `src.inference` probability path established in Cut 4 and remove only remaining evaluation-local prediction normalization/orchestration that duplicates it.
+2. Continue obtaining images, labels, case IDs, and evaluation metadata through existing dataloaders with explicit `load_labels=True`; use the Cut 3 extended labeled result when dual-space evaluation requires native and transformed references.
 3. Continue returning `VolumeSample` contracts to the evaluation engine.
 4. Compose the active top-level `cfg.inference` and `cfg.inference_runtime=native` instead of defining a second evaluation-specific prediction schema.
 5. Preserve fixed, sweep, oracle, and sweep-with-oracle threshold protocols under evaluation config.
@@ -1208,15 +1381,15 @@ Cuts 0-4.
 
 ### Rollback
 
-Retain a short-lived switch to the old model-volume producer until parity is certified. Do not maintain both paths indefinitely.
+Revert evaluation-specific config/result-space/provenance integration to the accepted Cut 4 model-space shared-predictor state if needed. Do not restore the removed `valid_utils.py` inferer or introduce a second model-volume prediction implementation as a Cut 5 rollback mechanism.
 
 ---
 
-## 18. Cut 6: Migrate training-time validation without changing training
+## 18. Cut 6: Complete training-validation configuration migration and certify unchanged training
 
 ### Context
 
-The main training pipeline directly invokes the current validation inferer. It should consume the same predictor so future inference fixes benefit both training validation and deployment. This cut must not broaden into a trainer rewrite.
+Cut 4 has already migrated training-time probability generation directly from the removed validation inferer to the shared predictor. Cut 6 completes the configuration and consumer-responsibility migration around that accepted path, then certifies that labels, metrics, progress, logging, checkpoint selection, and optimization behavior remain unchanged. This cut must not repeat the predictor migration or broaden into a trainer rewrite.
 
 ### Dependencies
 
@@ -1225,24 +1398,23 @@ Cuts 0-5, with evaluation parity already green.
 ### Affected files and components
 
 - `src/training/trainer.py::validate_one_epoch`
-- `src/utils/valid_utils.py`
 - `src/utils/ensemble.py` where mean aggregation is reused
 - `configs/validation/*.yaml`
-- new `configs/inference/*.yaml`
-- new `configs/inference_runtime/native.yaml`
+- existing `configs/inference/*.yaml`
+- existing `configs/inference_runtime/native.yaml`
 - validation/runtime contract tests
 - training smoke tests
 
 ### Desired changes
 
-1. Route ordinary validation probability generation through the shared predictor/compatibility façade.
+1. Retain and certify the direct shared-predictor probability path established by Cut 4; do not reintroduce a `valid_utils` compatibility façade.
 2. Keep the trainer responsible for:
    - moving labels to the training device;
    - metric object lifecycle;
    - progress display;
    - checkpoint selection;
    - validation logging.
-3. Move new prediction execution settings out of validation presets and into composed top-level `configs/inference/` presets.
+3. Move prediction execution settings out of validation presets and into the already established, composed top-level `configs/inference/` presets.
 4. Keep validation config responsible for metrics, cadence, progress reporting, and checkpoint selection.
 5. Preserve old run compatibility by translating `cfg.validation.inference` when `cfg.inference` is absent.
 6. Preserve existing ensemble behavior for supported modes, but do not enable 3D soft STAPLE.
@@ -1254,6 +1426,7 @@ Cuts 0-5, with evaluation parity already green.
 
 - One-epoch or one-batch training validation smoke test completes.
 - Metric parity against Cut 0 baseline passes.
+- Training validation still imports/calls the direct shared predictor, and no removed `valid_utils` inferer symbol is restored.
 - Best-checkpoint metric names and update behavior remain unchanged.
 - New training presets compose `cfg.inference`; old saved configs containing only `cfg.validation.inference` still validate identically.
 - Explicit inference overrides replace the legacy policy rather than partially merging with it.
@@ -1270,13 +1443,15 @@ Cuts 0-5, with evaluation parity already green.
 
 ### Rollback
 
-Revert only the trainer validation call site to the compatibility façade's prior implementation; training remains otherwise unaffected.
+Revert only Cut 6's validation-config composition and surrounding assessment wiring to the accepted Cut 4 state; training remains otherwise unaffected. Do not restore the removed legacy inferer or fork prediction mechanics.
 
 ---
 
 ## 19. Cut 7: Native-space probability restoration and output correctness
 
 ### Context
+
+Cut 7 consumes the architecture-neutral, model-space probability result established in Cut 4; it does not inspect raw model outputs or apply an activation.
 
 The previous competition failure mode—returning a mask aligned to the reoriented input rather than the original image—is a primary design risk. Spatial correctness must be independently certified before postprocessing or container work can be called complete.
 
@@ -1298,7 +1473,7 @@ Cuts 0-4; may proceed in parallel with consumer migrations once contracts are st
 ### Desired changes
 
 1. Accept the validated `inference.output_space` and retain model-space results without inversion when `model_preprocessed` is selected.
-2. Invert model-space probabilities through spacing and orientation transforms when `native_input` is selected.
+2. Invert model-space probabilities through spacing and orientation transforms when `native_input` is selected, using the case-specific native reference geometry retained by the registered dataset adapter rather than a dataset-wide geometry assumption.
 3. Use continuous interpolation suitable for probabilities during inversion.
 4. Restore exact original array shape.
 5. Reconstruct or copy the correct affine/qform/sform semantics.
@@ -1326,6 +1501,7 @@ Cuts 0-4; may proceed in parallel with consumer migrations once contracts are st
 - Output dtype and allowed values are exact.
 - Deliberately corrupted trace or affine mismatch fails rather than writing a plausible file.
 - If both nibabel and MONAI metadata are used, their affine interpretation is cross-checked.
+- Cases with different native grids restore independently to their own recorded reference geometry.
 
 ### Acceptance criteria
 
@@ -1343,7 +1519,7 @@ No deployment fallback to un-inverted output is permitted. A failure blocks rele
 
 ### Context
 
-Training validation, offline evaluation, local/container diagnostics, and competition inference may benefit from invertible TTA, multi-checkpoint ensembling, a fixed decision threshold, and component filtering. These operations belong to the shared inference schema rather than a GC-only policy, remain separate from the saved model configuration, and must be evaluated incrementally. Label-dependent threshold calibration remains an evaluation concern. Baseline single-model inference must remain available.
+Training validation, offline evaluation, native/container diagnostics, and competition inference may benefit from invertible TTA, multi-checkpoint ensembling, a fixed decision threshold, and component filtering. These operations belong to the shared inference schema rather than a GC-only policy, remain separate from the saved model configuration, and must be evaluated incrementally. Label-dependent threshold calibration remains an evaluation concern. Baseline single-model inference must remain available.
 
 ### Dependencies
 
@@ -1377,6 +1553,7 @@ Cuts 0-7 and a working canonical evaluation path.
 9. Keep `keep_largest_only` disabled by default because multifocal lesions are scientifically plausible.
 10. Record every enabled operation, output space, and parameter in output provenance.
 11. Add evaluation recipes comparing baseline versus each enhancement independently and in combination in both scientifically valid result/reference spaces.
+12. Apply enhancements to outputs from prepared `ProbabilityPredictor` instances; TTA and ensemble code must not inspect model architecture, deep-supervision structure, activation, or diffusion sampler internals.
 
 ### Expected tests and testing components
 
@@ -1431,7 +1608,7 @@ Cuts 1-4; Cut 8 if the final policy schema is included.
 
 1. Provide a command that accepts one run-dir/checkpoint specification and an explicit shared inference-policy path.
 2. Copy, never mutate or trim, the complete resolved training config and exact checkpoint into a staging directory.
-3. Reject a missing `.hydra/config.yaml`, ambiguous checkpoint, or unsupported initial-release model contract.
+3. Reject a missing `.hydra/config.yaml`, ambiguous checkpoint, unsupported initial-release model contract, or saved `dataset.id` without an implemented preprocessing adapter.
 4. Generate SHA-256 hashes and a versioned manifest.
 5. Validate the staged artifact by loading its singular model through the shared model-domain and inference paths before packaging.
 6. Create `algorithmmodel.tar.gz` with contents rooted correctly for `/opt/ml/model/` extraction.
@@ -1450,6 +1627,7 @@ Cuts 1-4; Cut 8 if the final policy schema is included.
 - Ambiguous/missing checkpoints fail.
 - A singular model artifact validates and loads strictly at the release boundary.
 - Unsupported diffusion or 2D artifact fails for the initial release profile.
+- ISLES24 and ISLES26 artifacts resolve their registered preprocessing adapters in generic builder validation; the ISLES26 release profile then applies its narrower 3D discriminative certification constraints.
 - Historical `validation.inference.sw_batch_size=4` remains visible in the copied saved config but does not override an archived GC policy selecting one.
 - The artifact loads when mounted at a temporary `/opt/ml/model` equivalent.
 - Repeated builds from identical inputs have identical logical manifests and, if deterministic tar metadata is implemented, identical archive hashes.
@@ -1472,6 +1650,8 @@ The builder is additive. Delete a failed staged artifact; source run files remai
 ### Context
 
 The container must translate platform I/O into a call to the already certified shared inference package. It should not become another inference implementation. The runtime and dependency set must be constructed from the environment audit and current platform constraints.
+
+The first released image is certified for the ISLES26 3D discriminative artifact, but the builder and runtime are not ISLES26 preprocessing implementations. A user-supplied interface manifest binds the active phase's arbitrary socket slugs to canonical raw modality keys. The saved model config then selects a registered dataset adapter and its trained preprocessing. Consequently, another repository model trained on a supported dataset can use the same builder/runtime design with its own compatible artifact and interface manifest; adding an unknown dataset still requires a repository adapter.
 
 ### Dependencies
 
@@ -1504,24 +1684,31 @@ Cuts 0-7 and Cut 9. The final exact interface manifest is needed for upload cert
 4. Include all runtime dependencies at image build time; assume no runtime network.
 5. Run as a non-root user with write access only where required.
 6. Preserve the required Grand Challenge invoke label.
-7. Load and validate the singular model artifact during `init_model()` before health becomes ready.
+7. Load and validate the singular model artifact during `init_model()` before health becomes ready, including the saved `dataset.id`, required processed modalities, availability of its registered preprocessing adapter, and successful construction of a registered `ProbabilityPredictor`. Unsupported generative artifacts fail through the same predictor-capability error used by native execution rather than a container-only model branch.
 8. Compose the archived shared inference policy with `inference_runtime=gc_submission` for the production server and fail on incompatible capabilities.
-9. Read `/input/inputs.json`, calculate the sorted socket-slug interface key, and dispatch through the interface manifest.
-10. For the ISLES26 single interface, require exactly one 3D T1 image and only the other values specified by the official phase.
-11. If technical-parameter JSON is required, parse and validate it for transport/provenance only. Do not condition the model on it in this scope.
-12. Write exactly the required native-space output socket value under `/output/`.
-13. Re-open and validate output geometry, dtype, and values before returning HTTP 201.
-14. Return non-success on any model, input, spatial, inference, or output-validation failure.
-15. Keep protected filenames and image contents out of logs. Log timings, shapes, dtypes, device, memory peaks, artifact identifiers, policy hash, and runtime profile.
-16. Use `/tmp` only for transient scratch files and clean per-case state.
-17. Provide commands for `build-image`, `test`, `save`, and `build-all`.
-18. Provide a separate container diagnostic command/profile that can evaluate or retain `model_preprocessed` results without weakening the production `/invoke` contract.
+9. Require an explicit interface manifest at build/release configuration time. For each input it declares the socket slug, canonical raw dataset key, relative path/file type, and required cardinality; it also declares the output slug/path/type and any technical-JSON bindings.
+10. Read `/input/inputs.json`, calculate the sorted socket-slug interface key, and dispatch through that manifest without treating a slug as a modality name.
+11. Validate the manifest and invocation against the saved model contract: every required canonical raw key is bound once, no unsupported input is silently consumed, and the selected adapter can derive the saved processed modalities in their configured order.
+12. Pass the resulting canonical raw-key-to-path mapping to shared preprocessing with `load_labels=False`. Core preprocessing and prediction receive no socket identifiers.
+13. For the initial ISLES26 phase manifest, bind exactly the official 3D T1 input slug to canonical dataset key `T1` and accept only the other values published by the phase. This is release configuration, not a generic runtime branch on `isles26`.
+14. If technical-parameter JSON is required, parse and validate it for transport/provenance only. Do not condition the model on it in this scope.
+15. Write exactly the required native-space output value to the manifest's output binding beneath `/output/`.
+16. Re-open and validate output geometry, dtype, and values before returning HTTP 201.
+17. Return non-success on any model, dataset-adapter, interface-binding, input, spatial, inference, or output-validation failure.
+18. Keep protected filenames and image contents out of logs. Log timings, shapes, dtypes, device, memory peaks, artifact identifiers, policy hash, dataset adapter identity, and runtime profile.
+19. Use `/tmp` only for transient scratch files and clean per-case state.
+20. Provide commands for `build-image`, `test`, `save`, and `build-all`.
+21. Provide a separate container diagnostic command/profile that can evaluate or retain `model_preprocessed` results without weakening the production `/invoke` contract.
 
 ### Expected tests and testing components
 
 - `/health` remains non-ready until model initialization succeeds.
 - `/invoke` returns the expected platform status and writes one valid output.
 - Missing/extra inputs, wrong interface key, multiple files in a single-value socket, and corrupt input fail clearly.
+- An arbitrary fixture slug that is explicitly bound to canonical key `T1` produces the same canonical input and preprocessing result as another slug bound to `T1`; no test depends on naming the socket `T1`.
+- Missing, duplicate, unknown, or processed-modality-incompatible canonical bindings fail before preprocessing.
+- ISLES24 and ISLES26 fixture manifests dispatch to their registered adapters in runtime unit/integration tests; the production certification remains the ISLES26 3D model.
+- Runtime calls shared preprocessing with `load_labels=False`; no label path, dummy label, or `test_flag` coupling is present.
 - Model-init failure prevents health readiness.
 - Production initialization rejects transformed-space output, threshold sweeps, labels, or debug artifact retention.
 - The diagnostic profile can exercise both result spaces using mounted synthetic/reference data without writing invalid data to a production output socket.
@@ -1537,6 +1724,8 @@ Cuts 0-7 and Cut 9. The final exact interface manifest is needed for upload cert
 
 - The image and model artifact archive pass the current Grand Challenge template's local test lifecycle.
 - The container performs no scientific prediction logic outside `src.inference`.
+- The GC transport layer owns slugs and paths; saved model config plus the registered data adapter own preprocessing and modality semantics.
+- The builder/runtime can be configured for a compatible model from any registered repository dataset without editing ISLES26-specific Python branches.
 - The image is independently buildable and saveable without embedding replaceable weights.
 
 ### Rollback
@@ -1638,11 +1827,13 @@ Cuts 0-11 and the official ISLES26 interface manifest/starter pack.
 7. Compare returned output geometry with the uploaded test input.
 8. Record image digest, archive hashes, model hashes, policy, code commit, runtime versions, and platform job identifier.
 9. Record the active output space and prove that the production runtime rejected incompatible validation/evaluation options.
-10. Document build, model replacement, repository validation, container-diagnostic validation, platform test, troubleshooting, and rollback procedures.
+10. Document build, model replacement, native validation, container-diagnostic validation, platform test, troubleshooting, and rollback procedures.
 11. Document the migration from `validation.inference` to top-level `inference` and its precedence rules.
 12. Mark the older threshold-analysis implementation as delegated/deprecated once feature parity is confirmed.
 13. Replace or mark the old memory script as legacy once the release benchmark supersedes it.
-14. Retain compatibility wrappers for at least one stable release cycle where they protect existing workflows.
+14. Retain compatibility wrappers for at least one stable release cycle where a demonstrated historical or external workflow requires them. This does not apply to the internal `valid_utils.py::build_validation_inferer()` path, which is removed and migrated atomically in Cut 4.
+15. Document how a user creates an interface manifest by binding published socket slugs to canonical raw keys required by the saved model's registered dataset adapter; include one non-ISLES fixture/example to prevent the instructions from implying hardcoded T1/ISLES26 behavior.
+16. Document the distinction between a dataset-agnostic builder/runtime implementation and the narrower dataset/model/interface combination certified in a particular release.
 
 ### Expected tests and testing components
 
@@ -1653,6 +1844,7 @@ Cuts 0-11 and the official ISLES26 interface manifest/starter pack.
 - Grand Challenge try-out job completes successfully.
 - Downloaded/returned segmentation has exact allowed values and expected geometry.
 - Documentation commands are executed as written.
+- A fresh manifest using arbitrary fixture slugs can be validated against a registered non-ISLES26 model/dataset contract without Python code changes.
 
 ### Acceptance criteria
 
@@ -1714,16 +1906,24 @@ Recommended pull-request granularity is one cut per PR, except very small scaffo
 - model artifact manifest/hash validation at the release boundary;
 - checkpoint prefix handling and strictness;
 - predictor shape/domain checks;
+- architecture-neutral predictor execution with backend-owned raw-output interpretation;
 - sliding-window parameter validation;
+- probability-before-overlap-blending order;
+- early unsupported-generative failure naming the `ProbabilityPredictor` adapter extension point;
 - TTA inversion;
 - mean ensemble aggregation;
 - connected-component filtering;
 - interface dispatch and file discovery;
+- registered dataset-preprocessing adapter dispatch;
+- `load_labels` behavior and independence from `test_flag`;
+- socket-slug to canonical raw-key binding validation;
 - image read/write validation.
 
 ### 26.2 Spatial property tests
 
 - preprocessing/inversion across generated shapes and affines;
+- per-case native metadata capture across cases with deliberately different geometries;
+- metadata retention before raw modality keys are merged/removed;
 - world-coordinate preservation;
 - continuous probability inversion before thresholding;
 - output shape, affine, dtype, and allowed values;
@@ -1733,8 +1933,10 @@ Recommended pull-request granularity is one cut per PR, except very small scaffo
 
 ### 26.3 Repository integration tests
 
-- existing ISLES26 loader tests;
-- existing validation-inferer tests;
+- existing ISLES24 and ISLES26 loader, datalist, random-patch, and facade-routing tests;
+- labeled-default and label-free preprocessing parity tests;
+- characterization of the former validation-inferer behavior followed by direct shared-predictor consumer tests;
+- absence of remaining `build_validation_inferer` imports/calls after Cut 4;
 - evaluation model loader and volume producer tests;
 - evaluation pipeline and threshold protocol tests;
 - training validation smoke tests;
@@ -1748,6 +1950,7 @@ For a fixed model/checkpoint/input/config:
 
 - old and new preprocessed inputs match;
 - old and new model-space probability maps match within the predeclared tolerance;
+- old and new sliding-window paths both produce patch probabilities before overlap blending;
 - threshold-0.5 masks and metrics match;
 - threshold sweep selection remains stable;
 - native-space results are assessed against verified native labels;
@@ -1766,6 +1969,8 @@ Exact tolerance should be established in Cut 0. CPU/GPU and FP16/FP32 comparison
 - model mount at `/opt/ml/model`;
 - clean `/tmp` behavior;
 - exact input/output interface paths;
+- arbitrary-slug interface bindings to canonical dataset keys;
+- model-dataset adapter availability and raw-to-processed modality compatibility;
 - failure exit/status behavior;
 - saved-image reload test.
 
@@ -1820,6 +2025,7 @@ The release manifest links:
 - repository commit and dirty-worktree status;
 - runtime versions;
 - interface manifest version;
+- selected dataset preprocessing adapter and canonical input bindings;
 - inference API/schema versions;
 - active output space and runtime profile;
 - source of the active policy (`cfg.inference` or translated legacy fallback);
@@ -1841,7 +2047,7 @@ A dirty worktree does not automatically prohibit development builds, but competi
 ### 28.2 Training/evaluation/deployment drift
 
 **Risk:** Three implementations slowly diverge.
-**Mitigation:** One shared `src/models` lifecycle implementation plus one `src/inference` predictor and preprocessing definition; wrappers retain consumer-specific work only.
+**Mitigation:** One shared `src/models` lifecycle implementation, one `src/inference` predictor/orchestration path, and registered loader-stack preprocessing adapters reused by every consumer; training and evaluation retain only their assessment/orchestration responsibilities. Compatibility wrappers exist only at demonstrated legacy boundaries, not around the removed internal validation inferer.
 
 ### 28.3 Container configuration overrides the trained model
 
@@ -1896,7 +2102,37 @@ A dirty worktree does not automatically prohibit development builds, but competi
 ### 28.13 Premature generic abstraction
 
 **Risk:** Designing for every future model makes the critical path harder to validate.
-**Mitigation:** minimal probability predictor contract; one certified discriminative backend first.
+**Mitigation:** Minimal probability predictor contract and explicit dataset-adapter registry; implement ISLES24/ISLES26 adapters from existing loaders and certify one ISLES26 discriminative backend first. Unknown datasets fail rather than triggering speculative generalization.
+
+### 28.14 Dataset hardcoding in the container
+
+**Risk:** The GC runtime copies ISLES26 transforms or assumes that a socket name is `T1`, so a compatible model from another registered dataset cannot be packaged without Python changes.
+**Mitigation:** Select preprocessing from saved `dataset.id`; keep dataset-specific transforms in registered loader adapters; require an explicit interface-manifest binding from arbitrary socket slugs to canonical raw keys.
+
+### 28.15 Label-mode coupling regresses existing validation
+
+**Risk:** Reusing `test_flag` to mean blind inference removes labels from existing validation/test partitions, or image-only inference accidentally still requires a label.
+**Mitigation:** Independent `load_labels: bool = True`, conditional datalist/transform keys, explicit false at blind-inference call sites, and a full flag-combination test matrix.
+
+### 28.16 Native metadata is lost before restoration
+
+**Risk:** Raw modality keys/meta are deleted during channel merging, leaving only a transformed tensor and no trustworthy path back to the case's input grid.
+**Mitigation:** Capture native metadata per case and raw modality before preprocessing begins, retain an explicit trace/reference geometry, and test cases with different native grids.
+
+### 28.17 Invalid interface-to-model modality binding
+
+**Risk:** A valid platform socket is bound to the wrong canonical key or cannot produce the processed channels expected by the saved model, causing silent scientific input drift.
+**Mitigation:** Validate binding uniqueness, adapter-recognized raw keys, and raw-to-processed coverage/order during initialization and before invocation; never infer bindings from slug text.
+
+### 28.18 Model-specific output handling leaks into shared inference
+
+**Risk:** `src.inference` begins branching on DynUNet/SwinUNETR or interpreting deep-supervision returns, coupling a supposedly reusable path to current architectures and duplicating backend logic.
+**Mitigation:** Require an architecture-neutral `ProbabilityPredictor`; keep raw-output parsing, final-head selection, and activation in backend/model adapters; test shared execution with a generic mock predictor and reject unsupported backends at registration.
+
+### 28.19 Sliding-window aggregation order changes scientific output
+
+**Risk:** A refactor blends logits and applies sigmoid after overlap aggregation even though the accepted path predicts probabilities per patch and blends those probabilities, causing unmeasured probability and metric drift.
+**Mitigation:** Characterize and preserve probability-before-blending in Cut 4 with parity/order regression tests. Treat logits-first blending only as a future explicit experimental policy with offline comparison and new release evidence.
 
 ---
 
@@ -1904,7 +2140,10 @@ A dirty worktree does not automatically prohibit development builds, but competi
 
 This CAP is complete only when all of the following are true:
 
-- [ ] `src/inference/` is the canonical 3D discriminative prediction implementation.
+- [ ] `src/inference/` is the canonical architecture-neutral prediction implementation, with the 3D discriminative backend as the first supported implementation.
+- [ ] Raw model-output/deep-supervision interpretation and activation remain backend-owned; shared inference has no model-architecture branching.
+- [ ] Sliding-window inference preserves the certified probability-before-blending order unless a separately validated explicit policy is introduced.
+- [ ] Training validation and live-model evaluation call `src.inference` directly; inference-specific symbols and the `build_validation_inferer()` façade are absent from `src/utils/valid_utils.py`.
 - [ ] `src/models/` owns shared single-model construction and checkpoint loading; release-only strict validation is used by deployment without changing legacy resume behavior.
 - [ ] Training validation, offline evaluation, native Python inference, container diagnostics, and GC deployment use one top-level `cfg.inference` schema.
 - [ ] `cfg.inference_runtime` profiles enforce native-Python, diagnostic-container, and submission capabilities without silently rewriting requested policy.
@@ -1912,14 +2151,18 @@ This CAP is complete only when all of the following are true:
 - [ ] Explicit top-level inference config replaces rather than field-merges with historical validation inference settings.
 - [ ] Existing evaluation uses it and passes parity tests.
 - [ ] Training-time validation uses it without changing training behavior.
-- [ ] Label-free ISLES26 preprocessing shares the trained transform definition.
+- [ ] ISLES24 and ISLES26 deterministic preprocessing are registered by saved `dataset.id` and shared by labeled native workflows and label-free inference without container-side transform copies.
+- [ ] Dataset constructors default to `load_labels=True`; blind inference explicitly uses `False`; `test_flag` remains independent; and no dummy label is created.
+- [ ] Native metadata is captured separately for every case and raw modality before preprocessing/channel merging, with sufficient geometry and trace for restoration.
+- [ ] The builder/runtime is dataset-agnostic across registered repository adapters and fails clearly for an unavailable adapter.
 - [ ] Native-space restoration passes shape, affine, and world-coordinate tests.
 - [ ] A model tarball can be built from run-dir/checkpoint specifications and loads strictly from `/opt/ml/model/`.
 - [ ] Docker image and model artifact archive build independently and together.
 - [ ] The container implements the current Grand Challenge HTTP lifecycle and runs non-root/offline.
-- [ ] The exact ISLES26 interface manifest is implemented with no placeholder socket slugs.
+- [ ] The exact ISLES26 interface manifest is implemented with no placeholder socket slugs and explicitly binds each published input slug to its canonical raw dataset key.
+- [ ] Core preprocessing/inference receive canonical dataset keys only; arbitrary competition slug names remain isolated to the GC transport layer.
 - [ ] Output is a valid binary integer segmentation on the input grid.
-- [ ] Repository validation can explicitly and correctly evaluate `model_preprocessed` or `native_input` output against a reference in the same space.
+- [ ] Native validation can explicitly and correctly evaluate `model_preprocessed` or `native_input` output against a reference in the same space.
 - [ ] Container diagnostics can exercise either output space, while production `/invoke` accepts only `native_input`.
 - [ ] The exact release candidate passes T4 memory and ten-minute qualification with headroom.
 - [ ] At least one Grand Challenge platform try-out succeeds before submission.
@@ -1964,7 +2207,9 @@ The following boundaries should remain backend-neutral:
 - Grand Challenge transport and output validation;
 - model artifact manifest versioning and capability declarations.
 
-A future diffusion implementation should therefore add a predictor backend and extend model-artifact capability validation rather than fork the container or spatial pipeline.
+A future diffusion implementation should therefore implement and register an adapter satisfying `src.inference.contracts.ProbabilityPredictor`, then extend model-artifact capability validation rather than fork the container or spatial pipeline. That adapter owns sampler invocation and conversion of backend-specific returns into finite `[B, C, *spatial]` probabilities; the shared inference package must not acquire DDPM/DDIM/OpenAI-diffusion branches.
+
+The existing discriminative sliding-window contract predicts a probability for each patch and then blends overlapping probabilities. A future stochastic diffusion predictor may reuse that execution layer only after it defines and tests patch compatibility, noise seeding/correlation across windows, repeatability, seam behavior, and the meaning/calibration of its returned probabilities. Merely satisfying the tensor signature does not certify stochastic sliding-window inference.
 
 The shared interface must nevertheless remain honest: until a backend passes 5D tests, `data_mode.dim=3d` plus a non-discriminative `diffusion.type` must fail with a clear capability error.
 

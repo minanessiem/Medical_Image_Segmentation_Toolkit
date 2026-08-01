@@ -20,6 +20,10 @@ from src.inference.contracts import (
     UnsupportedModelError,
 )
 from src.inference.preprocessing import preprocess_case
+from src.inference.pipeline import (
+    ModelProbabilityExecutor,
+    build_model_probability_executor,
+)
 from src.inference.policy import (
     InferencePolicy,
     ResolvedInferencePolicy,
@@ -44,6 +48,7 @@ __all__ = [
     "InvalidInferenceRuntimeError",
     "InvalidPredictionError",
     "LabeledPreprocessedCase",
+    "ModelProbabilityExecutor",
     "NativeImageMetadata",
     "PredictionResult",
     "PredictorCapabilities",
@@ -57,6 +62,7 @@ __all__ = [
     "TimingResourceRecord",
     "UnsupportedModelError",
     "ValidatedInferenceRequest",
+    "build_model_probability_executor",
     "parse_inference_policy",
     "parse_inference_runtime",
     "resolve_inference_policy",

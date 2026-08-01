@@ -31,8 +31,21 @@ def _base_cfg(diffusion_type="Discriminative", dim="3d"):
                 "loader_mode": "full_volumes_3d",
             },
             "diffusion": {"type": diffusion_type},
+            "model": {
+                "spatial_dims": dim,
+                "image_channels": 1,
+                "out_channels": 1,
+            },
             "validation": {"inference": {"mode": "direct"}},
-            "dataset": {"active_subsets": {"val": "val_fast"}},
+            "dataset": {
+                "active_subsets": {"val": "val_fast"},
+                "preprocessing_configs": {
+                    "roi": {
+                        "slice_2d": [2, 2],
+                        "volume_3d": [2, 2, 2],
+                    }
+                },
+            },
         }
     )
 
@@ -104,13 +117,13 @@ class TestModelVolumeIO(unittest.TestCase):
         }
         dataloader = [(image, label, sample_ids, metas)]
 
-        def inferer(conditioned_image, volume_label=None, show_window_progress=True):
-            self.assertEqual(volume_label, "case_a")
+        def inferer(conditioned_image, progress_label=None, show_window_progress=True):
+            self.assertEqual(progress_label, "case_a")
             self.assertFalse(show_window_progress)
             return conditioned_image + 0.25
 
         with patch(
-            "scripts.evaluation.io.model_volumes.build_validation_inferer",
+            "scripts.evaluation.io.model_volumes.build_model_probability_executor",
             return_value=inferer,
         ):
             samples = list(
@@ -143,12 +156,12 @@ class TestModelVolumeIO(unittest.TestCase):
         label = torch.ones(2, 1, 2, 2, 2)
         dataloader = [(image, label, ["case_a", "case_b"])]
 
-        def inferer(conditioned_image, volume_label=None, show_window_progress=True):
-            del volume_label, show_window_progress
+        def inferer(conditioned_image, progress_label=None, show_window_progress=True):
+            del progress_label, show_window_progress
             return conditioned_image + 0.5
 
         with patch(
-            "scripts.evaluation.io.model_volumes.build_validation_inferer",
+            "scripts.evaluation.io.model_volumes.build_model_probability_executor",
             return_value=inferer,
         ):
             samples = list(

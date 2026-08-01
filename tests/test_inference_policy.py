@@ -203,6 +203,8 @@ class TestInferencePolicyParsing(unittest.TestCase):
         self.assertEqual(resolved.policy.sliding_window.roi_size, (48, 48, 48))
         self.assertEqual(resolved.policy.sliding_window.sw_batch_size, 4)
         self.assertEqual(resolved.policy.sliding_window.overlap, 0.25)
+        self.assertEqual(resolved.policy.sliding_window.blend_mode, "constant")
+        self.assertEqual(resolved.policy.sliding_window.padding_mode, "reflect")
 
     def test_explicit_legacy_direct_mode_remains_compatible(self):
         cfg = OmegaConf.create(

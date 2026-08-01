@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from scripts.evaluation.core.contracts import VolumeSample
 from scripts.evaluation.core.model_loader import is_discriminative_config, resolve_diffusion_type
-from src.utils.valid_utils import build_validation_inferer
+from src.inference.pipeline import build_model_probability_executor
 
 
 BatchType = Any
@@ -62,7 +62,7 @@ def iter_model_volume_samples(
         raise ValueError("max_samples must be > 0 when provided.")
 
     resolved_device = torch.device(device)
-    inferer = build_validation_inferer(model, cfg)
+    inferer = build_model_probability_executor(backend=model, cfg=cfg)
     total_batches = _safe_len(dataloader)
     batch_iterable = _wrap_with_progress(dataloader, total_batches, show_progress)
     loader_mode = str(OmegaConf.select(cfg, "data_mode.loader_mode", default="") or "")
@@ -79,7 +79,7 @@ def iter_model_volume_samples(
             image = image.to(resolved_device)
             prediction = inferer(
                 image,
-                volume_label=_resolve_batch_label(sample_ids, batch_index),
+                progress_label=_resolve_batch_label(sample_ids, batch_index),
                 show_window_progress=show_progress,
             )
             probabilities = normalize_probability_prediction(prediction)
