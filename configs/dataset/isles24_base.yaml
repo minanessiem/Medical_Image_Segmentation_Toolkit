@@ -1,5 +1,6 @@
 id: isles24
 name: isles24
+load_labels: true
 fold: 0
 partitioning: fold
 subsets:

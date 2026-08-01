@@ -6,6 +6,7 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 
+from src.data.loader_stack.contracts import LabelRequiredError
 from src.data.loader_stack.isles24_loader import ISLES24RandomPatches3D
 
 
@@ -46,6 +47,16 @@ def _build_preprocessing_configs(
 
 
 class TestIsles24RandomPatches3D(unittest.TestCase):
+    def test_label_free_random_patch_construction_fails_immediately(self):
+        with self.assertRaisesRegex(LabelRequiredError, "requires labels"):
+            ISLES24RandomPatches3D(
+                directory=".",
+                datalist_json="unused.json",
+                modalities=["CBF_min_0_max_70"],
+                load_labels=False,
+                preprocessing_configs={},
+            )
+
     def _prepare_datalist(self, base: Path) -> Path:
         case_a = {
             "cbf": base / "R001/sub-r001s001/ses-1/anat/cbf_a.nii.gz",

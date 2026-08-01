@@ -31,6 +31,7 @@ from monai.transforms import (
 )
 
 from src.data.augmentation import AugmentationPipeline2D, AugmentationPipeline3D
+from src.data.loader_stack.contracts import InvalidCaseRecordError, LabelRequiredError
 from src.data.loader_stack.subset_contract import filter_records_for_subset
 from src.data.modalities import get_modality_params
 from src.data.modalities import process_cbf
@@ -65,6 +66,24 @@ def _resolve_isles24_base_modality(modality_config: str) -> str:
     return LoaderDataUtils.get_base_modality_key(modality_config)
 
 
+def _normalize_isles24_modalities(
+    modalities: Optional[list[str] | tuple[str, ...]],
+) -> tuple[str, ...]:
+    if modalities is None:
+        raise ValueError("ISLES24 preprocessing requires an explicit modalities list.")
+    normalized = tuple(str(modality) for modality in modalities)
+    if not normalized:
+        raise ValueError("ISLES24 preprocessing requires a non-empty modalities list.")
+    for modality in normalized:
+        base_modality = _resolve_isles24_base_modality(modality)
+        if base_modality not in MODALITY_PROCESSORS:
+            raise ValueError(
+                f"Unknown ISLES24 base modality '{base_modality}' in '{modality}'. "
+                f"Supported raw modality keys: {tuple(MODALITY_PROCESSORS)}."
+            )
+    return normalized
+
+
 def _process_isles24_modality(
     modality_config: str,
     raw_tensor: torch.Tensor,
@@ -88,11 +107,14 @@ def _process_isles24_modality(
 def _build_isles24_common_preprocess_transforms(
     modalities: list[str] | tuple[str, ...],
     preprocessing_configs: Mapping[str, Any],
+    load_labels: bool = True,
 ) -> list[Any]:
     base_modalities = sorted(
         set(_resolve_isles24_base_modality(modality) for modality in modalities)
     )
-    keys_to_load = [*base_modalities, "label"]
+    keys_to_load = [*base_modalities]
+    if load_labels:
+        keys_to_load.append("label")
 
     common_cfg = preprocessing_configs["common"]
     orientation_cfg = common_cfg["orientation"]
@@ -120,13 +142,14 @@ def _build_isles24_common_preprocess_transforms(
             field_name="dataset.preprocessing_configs.common.spacing.pixdim",
         )
         image_interp = str(spacing_cfg["interpolation"]["image"])
-        label_interp = str(spacing_cfg["interpolation"]["label"])
-        spacing_modes = tuple([image_interp] * len(base_modalities) + [label_interp])
+        spacing_modes = [image_interp] * len(base_modalities)
+        if load_labels:
+            spacing_modes.append(str(spacing_cfg["interpolation"]["label"]))
         transforms.append(
             Spacingd(
                 keys=keys_to_load,
                 pixdim=pixdim,
-                mode=spacing_modes,
+                mode=tuple(spacing_modes),
             )
         )
 
@@ -141,7 +164,10 @@ def _build_isles24_common_preprocess_transforms(
                 modalities,
                 resolve_base_modality=_resolve_isles24_base_modality,
             ),
-            EnsureTyped(keys=["image", "label"], dtype=torch.float32),
+            EnsureTyped(
+                keys=["image", *(("label",) if load_labels else ())],
+                dtype=torch.float32,
+            ),
         ]
     )
     return transforms
@@ -150,19 +176,26 @@ def _build_isles24_common_preprocess_transforms(
 def build_isles24_common_preprocessed_volume_pipeline(
     modalities: list[str] | tuple[str, ...],
     preprocessing_configs: Mapping[str, Any],
+    load_labels: bool = True,
 ) -> Compose:
     return build_monai_compose_safe(
-        _build_isles24_common_preprocess_transforms(modalities, preprocessing_configs)
+        _build_isles24_common_preprocess_transforms(
+            modalities,
+            preprocessing_configs,
+            load_labels=load_labels,
+        )
     )
 
 
 def build_isles24_full_volumes_3d_pipeline(
     modalities: list[str] | tuple[str, ...],
     preprocessing_configs: Mapping[str, Any],
+    load_labels: bool = True,
 ) -> Compose:
     transforms = _build_isles24_common_preprocess_transforms(
         modalities,
         preprocessing_configs,
+        load_labels=load_labels,
     )
     fullvol_cfg = preprocessing_configs["full_volumes_3d"]
     if bool(fullvol_cfg["pad_to_divisible"]):
@@ -171,7 +204,8 @@ def build_isles24_full_volumes_3d_pipeline(
             expected_len=3,
             field_name="dataset.preprocessing_configs.roi.volume_3d",
         )
-        transforms.append(SpatialPadd(keys=["image", "label"], spatial_size=roi_3d))
+        pad_keys = ["image", *(("label",) if load_labels else ())]
+        transforms.append(SpatialPadd(keys=pad_keys, spatial_size=roi_3d))
     return build_monai_compose_safe(transforms)
 
 
@@ -183,6 +217,7 @@ def datafold_read(
     subset_name: Optional[str] = None,
     partitioning: str = "fold",
     subset_definitions: Optional[Mapping[str, Mapping[str, tuple[Any, ...]]]] = None,
+    load_labels: bool = True,
 ):
     """
     Read and normalize ISLES24 datalist entries.
@@ -196,12 +231,28 @@ def datafold_read(
         json_data = json.load(f)
 
     json_data = json_data[key]
-    for d in json_data:
+    normalized_records = []
+    for raw_record in json_data:
+        if not isinstance(raw_record, Mapping):
+            raise InvalidCaseRecordError(
+                "ISLES24 datalist entries must be mappings."
+            )
+        d = dict(raw_record)
+        if "caseID" not in d:
+            raise InvalidCaseRecordError("ISLES24 record is missing required key 'caseID'.")
+        if load_labels and not LoaderDataUtils.is_non_empty(d.get("label")):
+            raise InvalidCaseRecordError(
+                "ISLES24 record requires a non-empty 'label' path when load_labels=True."
+            )
+        if not load_labels:
+            d.pop("label", None)
         for k, v in d.items():
             if k == "caseID":
                 d[k] = LoaderDataUtils.normalize_case_id(v, field_name="caseID")
             elif isinstance(v, (str, list)):
                 d[k] = LoaderDataUtils.resolve_path_value(basedir, v)
+        normalized_records.append(d)
+    json_data = normalized_records
 
     if subset_name is None and subset_definitions is None and partitioning == "fold":
         tr = [d for d in json_data if d.get("fold") != fold]
@@ -280,6 +331,7 @@ class ISLES24Dataset3D(torch.utils.data.Dataset):
         preprocessing_configs: Optional[Mapping[str, Any]] = None,
         aug_cfg=None,
         is_training=False,
+        load_labels: bool = True,
     ):
         super().__init__()
         self.directory = os.path.expanduser(directory)
@@ -302,6 +354,7 @@ class ISLES24Dataset3D(torch.utils.data.Dataset):
         self.preprocessing_configs = dict(preprocessing_configs)
         self.aug_cfg = aug_cfg
         self.is_training = bool(is_training)
+        self.load_labels = bool(load_labels)
         self.subset_name = (
             str(subset_name).strip()
             if subset_name is not None
@@ -321,10 +374,12 @@ class ISLES24Dataset3D(torch.utils.data.Dataset):
             subset_name=self.subset_name,
             partitioning=self.partitioning,
             subset_definitions=self.subset_definitions,
+            load_labels=self.load_labels,
         )
         self.full_volume_pipeline = build_isles24_full_volumes_3d_pipeline(
             modalities=self.modalities,
             preprocessing_configs=self.preprocessing_configs,
+            load_labels=self.load_labels,
         )
 
     def __len__(self):
@@ -361,9 +416,19 @@ class ISLES24Dataset3D(torch.utils.data.Dataset):
         case_input = LoaderDataUtils.resolve_case_input_paths(
             filedict=filedict,
             base_modalities=self.base_modalities,
+            include_label=self.load_labels,
         )
         case_data = self.full_volume_pipeline(case_input)
         image = case_data["image"]
+        if not self.load_labels:
+            if self.augmentation is not None:
+                raise LabelRequiredError(
+                    "ISLES24Dataset3D augmentation requires labels, but load_labels=False."
+                )
+            if self.transform:
+                image = self.transform(image)
+            return image, filedict["caseID"]
+
         label = case_data["label"]
 
         if self.augmentation is not None:
@@ -438,8 +503,14 @@ class ISLES24RandomPatches3D(torch.utils.data.Dataset):
         preprocessing_configs: Optional[Mapping[str, Any]] = None,
         aug_cfg=None,
         is_training=False,
+        load_labels: bool = True,
     ):
         super().__init__()
+        if not load_labels:
+            raise LabelRequiredError(
+                "ISLES24RandomPatches3D requires labels for label-guided random patch "
+                "sampling; load_labels=False is unsupported."
+            )
         self.directory = os.path.expanduser(directory)
         self.transform = transform
         self.modalities = modalities if modalities is not None else []
@@ -591,10 +662,12 @@ class ISLES24Dataset2D(torch.utils.data.Dataset):
         aug_cfg=None,
         is_training=False,
         preprocessing_configs: Optional[Mapping[str, Any]] = None,
+        load_labels: bool = True,
     ):
         super().__init__()
         self.directory = os.path.expanduser(directory)
         self.transform = transform
+        self.load_labels = bool(load_labels)
         self.modalities = modalities if modalities is not None else []
         self.base_modalities = sorted(
             list(
@@ -619,6 +692,7 @@ class ISLES24Dataset2D(torch.utils.data.Dataset):
             subset_name=self.subset_name,
             partitioning=self.partitioning,
             subset_definitions=self.subset_definitions,
+            load_labels=self.load_labels,
         )
 
         self.all_slices = []
@@ -707,6 +781,7 @@ class ISLES24Dataset2D(torch.utils.data.Dataset):
                         case_input_paths = LoaderDataUtils.resolve_case_input_paths(
                             filedict=filedict,
                             base_modalities=self.base_modalities,
+                            include_label=self.load_labels,
                         )
                         for key, filepath in case_input_paths.items():
                             if os.path.exists(filepath):
@@ -725,6 +800,7 @@ class ISLES24Dataset2D(torch.utils.data.Dataset):
             case_input_paths = LoaderDataUtils.resolve_case_input_paths(
                 filedict=filedict,
                 base_modalities=self.base_modalities,
+                include_label=self.load_labels,
             )
             for key, filepath in case_input_paths.items():
                 if os.path.exists(filepath):
@@ -737,15 +813,21 @@ class ISLES24Dataset2D(torch.utils.data.Dataset):
         image_channels = [processed_images[f"processed_{m}"] for m in self.modalities]
         image = torch.stack(image_channels, dim=0)
 
-        label = data_slice.get("label")
-        if label is None:
-            label = torch.zeros_like(image_channels[0]).unsqueeze(0)
-        else:
-            label = label.unsqueeze(0)
-
         # Resize to match model input size
         resizer = Resize(spatial_size=(self.image_size, self.image_size))
         image = resizer(image)
+
+        virtual_path = f"{filedict['caseID']}_slice{slice_idx}"
+        if not self.load_labels:
+            if self.augmentation is not None:
+                raise LabelRequiredError(
+                    "ISLES24Dataset2D augmentation requires labels, but load_labels=False."
+                )
+            if self.transform:
+                image = self.transform(image)
+            return image, virtual_path
+
+        label = data_slice["label"].unsqueeze(0)
         label = resizer(label)
 
         # NEW: Apply augmentation if training mode
@@ -761,7 +843,6 @@ class ISLES24Dataset2D(torch.utils.data.Dataset):
             torch.set_rng_state(state)
             label = self.transform(label)
 
-        virtual_path = f"{filedict['caseID']}_slice{slice_idx}"
         return image, label, virtual_path
 
 
@@ -1072,6 +1153,20 @@ class ISLES24NNUNet2D(torch.utils.data.Dataset):
 # Explicit naming for loader routing contracts.
 ISLES24OnlineProc2D = ISLES24Dataset2D
 
+
+def build_preprocessing_adapter():
+    """Build the registered deterministic ISLES24 preprocessing adapter."""
+    from src.data.loader_stack.preprocessing import DatasetPreprocessingAdapter
+
+    return DatasetPreprocessingAdapter(
+        dataset_id="isles24",
+        canonical_raw_modalities=tuple(MODALITY_PROCESSORS),
+        build_full_volume_pipeline=build_isles24_full_volumes_3d_pipeline,
+        normalize_modalities=_normalize_isles24_modalities,
+        resolve_base_modality=_resolve_isles24_base_modality,
+    )
+
+
 __all__ = [
     "datafold_read",
     "ISLES24Dataset3D",
@@ -1079,4 +1174,5 @@ __all__ = [
     "ISLES24Dataset2D",
     "ISLES24NNUNet2D",
     "ISLES24OnlineProc2D",
+    "build_preprocessing_adapter",
 ]

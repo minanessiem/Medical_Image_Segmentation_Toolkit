@@ -253,7 +253,7 @@ def validate_dataset_contract(cfg):
             raise ValueError("random_patches_3d requires dataset.preprocessing_configs.")
 
 
-def get_dataloaders(cfg):
+def get_dataloaders(cfg, *, load_labels: bool = True):
     validate_dataset_contract(cfg)
     dataset_id, loader_mode, capabilities = _resolve_active_dataset_contract(cfg)
     route_key = (capabilities.loader_module, loader_mode)
@@ -384,6 +384,7 @@ def get_dataloaders(cfg):
             aug_cfg=aug_cfg,
             is_training=True,
             preprocessing_configs=preprocessing_configs,
+            load_labels=load_labels,
         )
         val_source_dataset = online_dataset_cls(
             directory=data_root,
@@ -403,6 +404,7 @@ def get_dataloaders(cfg):
             aug_cfg=None,
             is_training=False,
             preprocessing_configs=preprocessing_configs,
+            load_labels=load_labels,
         )
         if sample_subset == val_subset:
             sample_dataset = val_source_dataset
@@ -425,6 +427,7 @@ def get_dataloaders(cfg):
                 aug_cfg=None,
                 is_training=False,
                 preprocessing_configs=preprocessing_configs,
+                load_labels=load_labels,
             )
     elif loader_mode == "full_volumes_3d":
         if capabilities.loader_module == _ISLES24_LOADER_MODULE:
@@ -450,6 +453,7 @@ def get_dataloaders(cfg):
             preprocessing_configs=preprocessing_configs,
             aug_cfg=aug_cfg,
             is_training=True,
+            load_labels=load_labels,
         )
         val_source_dataset = fullvol_dataset_cls(
             directory=data_root,
@@ -465,6 +469,7 @@ def get_dataloaders(cfg):
             preprocessing_configs=preprocessing_configs,
             aug_cfg=None,
             is_training=False,
+            load_labels=load_labels,
         )
         if sample_subset == val_subset:
             sample_dataset = val_source_dataset
@@ -483,6 +488,7 @@ def get_dataloaders(cfg):
                 preprocessing_configs=preprocessing_configs,
                 aug_cfg=None,
                 is_training=False,
+                load_labels=load_labels,
             )
     elif loader_mode == "random_patches_3d":
         if capabilities.loader_module == _ISLES24_LOADER_MODULE:
@@ -510,6 +516,7 @@ def get_dataloaders(cfg):
             preprocessing_configs=preprocessing_configs,
             aug_cfg=aug_cfg,
             is_training=True,
+            load_labels=load_labels,
         )
         # Random patch mode trains on patches but validates/samples on full volumes.
         val_source_dataset = fullvol_dataset_cls(
@@ -526,6 +533,7 @@ def get_dataloaders(cfg):
             preprocessing_configs=preprocessing_configs,
             aug_cfg=None,
             is_training=False,
+            load_labels=load_labels,
         )
         if sample_subset == val_subset:
             sample_dataset = val_source_dataset
@@ -544,6 +552,7 @@ def get_dataloaders(cfg):
                 preprocessing_configs=preprocessing_configs,
                 aug_cfg=None,
                 is_training=False,
+                load_labels=load_labels,
             )
     else:
         raise ValueError(f"Unsupported loader_mode: {loader_mode}")

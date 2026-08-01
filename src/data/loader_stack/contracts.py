@@ -9,6 +9,22 @@ Phase 1 note:
 from __future__ import annotations
 
 
+class DatasetPreprocessingError(ValueError):
+    """Base error for dataset preprocessing contract failures."""
+
+
+class PreprocessingAdapterError(DatasetPreprocessingError):
+    """A dataset has no usable registered preprocessing adapter."""
+
+
+class LabelRequiredError(DatasetPreprocessingError):
+    """A requested loader or transform is intrinsically label-dependent."""
+
+
+class InvalidCaseRecordError(DatasetPreprocessingError):
+    """A dataset record violates its explicit image/label contract."""
+
+
 SUPPORTED_LOADER_MODES = (
     "online_slices_3d_to_2d",
     "nnunet_slices_2d",

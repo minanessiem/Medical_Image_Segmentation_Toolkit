@@ -36,6 +36,47 @@ def _build_preprocessing_configs(image_size: int) -> dict:
 
 
 class TestIsles26Dataset2D(unittest.TestCase):
+    def test_label_free_dataset_returns_image_and_identity_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            volume_path = base / "case/t1.nii.gz"
+            _write_nifti(
+                volume_path,
+                np.arange(24, dtype=np.float32).reshape(3, 4, 2),
+            )
+            datalist_path = base / "isles26.json"
+            datalist_path.write_text(
+                json.dumps(
+                    {
+                        "training": [
+                            {
+                                "split": "test",
+                                "caseID": "case-label-free",
+                                "T1": ["case/t1.nii.gz"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            dataset = ISLES26Dataset2D(
+                directory=str(base),
+                datalist_json=str(datalist_path),
+                subset_name="test",
+                modalities=["T1_RAW"],
+                test_flag=False,
+                load_labels=False,
+                image_size=4,
+                preprocessing_configs=_build_preprocessing_configs(image_size=4),
+            )
+
+            image, virtual_path = dataset[0]
+            self.assertEqual(tuple(image.shape), (1, 4, 4))
+            self.assertEqual(virtual_path, "case-label-free_slice0")
+            self.assertFalse(dataset.load_labels)
+            self.assertFalse(dataset.test_flag)
+
     def test_dataset2d_train_split_returns_slice_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

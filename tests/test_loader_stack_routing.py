@@ -1,6 +1,7 @@
 import unittest
 
 from src.data.loader_stack.factory import resolve_loader_contract
+from src.data.loader_stack.preprocessing import get_preprocessing_adapter
 from src.data.loader_stack.registry import get_dataset_capabilities
 
 
@@ -57,6 +58,21 @@ class TestLoaderStackRouting(unittest.TestCase):
                 dataset_name=None,
                 loader_mode="not_a_mode",
             )
+
+    def test_registered_preprocessing_adapters_follow_dataset_id(self):
+        isles24 = get_preprocessing_adapter("isles24")
+        isles26 = get_preprocessing_adapter("isles26")
+
+        self.assertEqual(isles24.dataset_id, "isles24")
+        self.assertEqual(isles26.dataset_id, "isles26")
+        self.assertEqual(
+            isles26.resolve_required_raw_modalities(("T1_RAW", "T1_ZSCORE")),
+            ("T1",),
+        )
+
+    def test_unavailable_preprocessing_adapter_fails_clearly(self):
+        with self.assertRaisesRegex(ValueError, "preprocessing adapter"):
+            get_preprocessing_adapter("unknown-dataset")
 
 
 if __name__ == "__main__":

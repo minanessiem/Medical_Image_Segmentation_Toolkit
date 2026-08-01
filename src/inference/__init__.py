@@ -6,6 +6,8 @@ from src.inference.contracts import (
     InvalidInferencePolicyError,
     InvalidInferenceRuntimeError,
     InvalidPredictionError,
+    LabeledPreprocessedCase,
+    NativeImageMetadata,
     PredictionResult,
     PredictorCapabilities,
     PreprocessedCase,
@@ -17,6 +19,7 @@ from src.inference.contracts import (
     TimingResourceRecord,
     UnsupportedModelError,
 )
+from src.inference.preprocessing import preprocess_case
 from src.inference.policy import (
     InferencePolicy,
     ResolvedInferencePolicy,
@@ -40,6 +43,8 @@ __all__ = [
     "InvalidInferencePolicyError",
     "InvalidInferenceRuntimeError",
     "InvalidPredictionError",
+    "LabeledPreprocessedCase",
+    "NativeImageMetadata",
     "PredictionResult",
     "PredictorCapabilities",
     "PreprocessedCase",
@@ -56,4 +61,5 @@ __all__ = [
     "parse_inference_runtime",
     "resolve_inference_policy",
     "validate_runtime_compatibility",
+    "preprocess_case",
 ]

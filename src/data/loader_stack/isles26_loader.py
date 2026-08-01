@@ -28,6 +28,7 @@ from monai.transforms import (
 )
 
 from src.data.augmentation import AugmentationPipeline2D, AugmentationPipeline3D
+from src.data.loader_stack.contracts import InvalidCaseRecordError, LabelRequiredError
 from src.data.loader_stack.subset_contract import filter_records_for_subset
 from src.utils.loader_monai_utils import build_monai_compose_safe
 from src.utils.loader_transforms import (
@@ -39,7 +40,8 @@ from src.utils.loader_utils import LoaderDataUtils
 ISLES26_MODALITY_KEY = "T1"
 ISLES26_SUPPORTED_MODALITY_KEYS = (ISLES26_MODALITY_KEY,)
 ISLES26_SUPPORTED_PREPROCESSING_KEYS = ("RAW", "ZSCORE", "PCTNORM", "PCT_ZSCORE")
-ISLES26_REQUIRED_RECORD_KEYS = ("caseID", ISLES26_MODALITY_KEY, "label", "split")
+ISLES26_REQUIRED_RECORD_KEYS = ("caseID", ISLES26_MODALITY_KEY, "split")
+ISLES26_REQUIRED_LABELED_RECORD_KEYS = (*ISLES26_REQUIRED_RECORD_KEYS, "label")
 ISLES26_OPTIONAL_RECORD_KEYS = ("siteID", "metadata_csv", "metadata", "fold")
 ISLES26_VIRTUAL_PATH_TEMPLATE = "{case_id}_slice{slice_idx}"
 ISLES26_PATCH_PATH_TEMPLATE = "{case_id}_patch{patch_idx}"
@@ -366,9 +368,12 @@ def _process_t1_modality(
 def _build_common_preprocess_transforms(
     modalities: Sequence[str],
     preprocessing_configs: Mapping[str, Any],
+    load_labels: bool = True,
 ) -> list[Any]:
     base_modalities = sorted(set(_resolve_base_modality(modality) for modality in modalities))
-    keys_to_load = [*base_modalities, "label"]
+    keys_to_load = [*base_modalities]
+    if load_labels:
+        keys_to_load.append("label")
 
     common_cfg = preprocessing_configs["common"]
     orientation_cfg = common_cfg["orientation"]
@@ -404,13 +409,14 @@ def _build_common_preprocess_transforms(
             field_name="dataset.preprocessing_configs.common.spacing.pixdim",
         )
         image_interp = str(spacing_cfg["interpolation"]["image"])
-        label_interp = str(spacing_cfg["interpolation"]["label"])
-        spacing_modes = tuple([image_interp] * len(base_modalities) + [label_interp])
+        spacing_modes = [image_interp] * len(base_modalities)
+        if load_labels:
+            spacing_modes.append(str(spacing_cfg["interpolation"]["label"]))
         transforms.append(
             Spacingd(
                 keys=keys_to_load,
                 pixdim=pixdim,
-                mode=spacing_modes,
+                mode=tuple(spacing_modes),
             )
         )
 
@@ -435,7 +441,10 @@ def _build_common_preprocess_transforms(
                 modalities,
                 resolve_base_modality=_resolve_base_modality,
             ),
-            EnsureTyped(keys=["image", "label"], dtype=torch.float32),
+            EnsureTyped(
+                keys=["image", *(("label",) if load_labels else ())],
+                dtype=torch.float32,
+            ),
         ]
     )
     return transforms
@@ -444,27 +453,39 @@ def _build_common_preprocess_transforms(
 def build_common_preprocessed_volume_pipeline(
     modalities: Sequence[str],
     preprocessing_configs: Mapping[str, Any],
+    load_labels: bool = True,
 ) -> Compose:
     return build_monai_compose_safe(
-        _build_common_preprocess_transforms(modalities, preprocessing_configs)
+        _build_common_preprocess_transforms(
+            modalities,
+            preprocessing_configs,
+            load_labels=load_labels,
+        )
     )
 
 
 def build_online_slices_3d_to_2d_case_pipeline(
     modalities: Sequence[str],
     preprocessing_configs: Mapping[str, Any],
+    load_labels: bool = True,
 ) -> Compose:
     return build_common_preprocessed_volume_pipeline(
         modalities=modalities,
         preprocessing_configs=preprocessing_configs,
+        load_labels=load_labels,
     )
 
 
 def build_full_volumes_3d_pipeline(
     modalities: Sequence[str],
     preprocessing_configs: Mapping[str, Any],
+    load_labels: bool = True,
 ) -> Compose:
-    transforms = _build_common_preprocess_transforms(modalities, preprocessing_configs)
+    transforms = _build_common_preprocess_transforms(
+        modalities,
+        preprocessing_configs,
+        load_labels=load_labels,
+    )
     fullvol_cfg = preprocessing_configs["full_volumes_3d"]
     if bool(fullvol_cfg["pad_to_divisible"]):
         roi_3d = LoaderDataUtils.as_int_tuple(
@@ -472,7 +493,8 @@ def build_full_volumes_3d_pipeline(
             expected_len=3,
             field_name="dataset.preprocessing_configs.roi.volume_3d",
         )
-        transforms.append(SpatialPadd(keys=["image", "label"], spatial_size=roi_3d))
+        pad_keys = ["image", *(("label",) if load_labels else ())]
+        transforms.append(SpatialPadd(keys=pad_keys, spatial_size=roi_3d))
     return build_monai_compose_safe(transforms)
 
 
@@ -629,15 +651,25 @@ def _normalize_t1_paths(t1_value: object, basedir: str) -> list[str]:
     return resolved_paths
 
 
-def _normalize_case_record(record: Mapping[str, Any], basedir: str) -> Dict[str, Any]:
+def _normalize_case_record(
+    record: Mapping[str, Any],
+    basedir: str,
+    *,
+    load_labels: bool = True,
+) -> Dict[str, Any]:
     """
     Validate and normalize one ISLES26 datalist record.
     """
-    missing = [key for key in ISLES26_REQUIRED_RECORD_KEYS if key not in record]
+    required_keys = (
+        ISLES26_REQUIRED_LABELED_RECORD_KEYS
+        if load_labels
+        else ISLES26_REQUIRED_RECORD_KEYS
+    )
+    missing = [key for key in required_keys if key not in record]
     if missing:
-        raise ValueError(
+        raise InvalidCaseRecordError(
             "ISLES26 record is missing required keys: "
-            f"{missing}. Required keys: {ISLES26_REQUIRED_RECORD_KEYS}."
+            f"{missing}. Required keys: {required_keys}."
         )
 
     normalized = _normalize_case_record_paths(record=record, basedir=basedir)
@@ -664,10 +696,17 @@ def _normalize_case_record(record: Mapping[str, Any], basedir: str) -> Dict[str,
         basedir=basedir,
     )
 
-    label_value = record.get("label")
-    if not LoaderDataUtils.is_non_empty(label_value):
-        raise ValueError("ISLES26 record requires non-empty 'label' path.")
-    normalized["label"] = str(LoaderDataUtils.resolve_path_value(basedir, label_value))
+    if load_labels:
+        label_value = record.get("label")
+        if not LoaderDataUtils.is_non_empty(label_value):
+            raise InvalidCaseRecordError(
+                "ISLES26 record requires a non-empty 'label' path when load_labels=True."
+            )
+        normalized["label"] = str(
+            LoaderDataUtils.resolve_path_value(basedir, label_value)
+        )
+    else:
+        normalized.pop("label", None)
 
     if "siteID" in record and LoaderDataUtils.is_non_empty(record.get("siteID")):
         normalized["siteID"] = str(record.get("siteID"))
@@ -688,7 +727,13 @@ def _normalize_case_record(record: Mapping[str, Any], basedir: str) -> Dict[str,
     return normalized
 
 
-def _read_normalized_records(datalist, basedir, key="training"):
+def _read_normalized_records(
+    datalist,
+    basedir,
+    key="training",
+    *,
+    load_labels: bool = True,
+):
     datalist_path = os.path.expanduser(str(datalist))
     basedir_path = os.path.expanduser(str(basedir))
 
@@ -714,7 +759,11 @@ def _read_normalized_records(datalist, basedir, key="training"):
                 f"got: {type(record).__name__}."
             )
         normalized_records.append(
-            _normalize_case_record(record=record, basedir=basedir_path)
+            _normalize_case_record(
+                record=record,
+                basedir=basedir_path,
+                load_labels=load_labels,
+            )
         )
     return normalized_records
 
@@ -726,6 +775,7 @@ def datafold_read(
     key="training",
     partitioning: str = "split",
     subset_definitions: Optional[Mapping[str, Mapping[str, tuple[Any, ...]]]] = None,
+    load_labels: bool = True,
 ):
     """
     Read and normalize ISLES26 datalist entries with subset-based selection.
@@ -734,6 +784,7 @@ def datafold_read(
         datalist=datalist,
         basedir=basedir,
         key=key,
+        load_labels=load_labels,
     )
     requested_subset = str(subset_name).strip()
     if len(requested_subset) == 0:
@@ -780,6 +831,7 @@ class ISLES26Dataset3D(torch.utils.data.Dataset):
         preprocessing_configs: Optional[Mapping[str, Any]] = None,
         aug_cfg=None,
         is_training=False,
+        load_labels: bool = True,
     ):
         super().__init__()
         self.directory = os.path.expanduser(str(directory))
@@ -799,6 +851,7 @@ class ISLES26Dataset3D(torch.utils.data.Dataset):
         self.image_size = int(image_size)
         self.aug_cfg = aug_cfg
         self.is_training = bool(is_training)
+        self.load_labels = bool(load_labels)
         if not isinstance(preprocessing_configs, Mapping):
             raise ValueError(
                 "ISLES26Dataset3D requires dataset.preprocessing_configs mapping. "
@@ -816,10 +869,12 @@ class ISLES26Dataset3D(torch.utils.data.Dataset):
             subset_name=self.subset_name,
             partitioning=self.partitioning,
             subset_definitions=self.subset_definitions,
+            load_labels=self.load_labels,
         )
         self.full_volume_pipeline = build_full_volumes_3d_pipeline(
             modalities=self.modalities,
             preprocessing_configs=self.preprocessing_configs,
+            load_labels=self.load_labels,
         )
         self.augmentation = None
         if self.is_training and self.aug_cfg is not None:
@@ -833,17 +888,27 @@ class ISLES26Dataset3D(torch.utils.data.Dataset):
         case_input = LoaderDataUtils.resolve_case_input_paths(
             filedict=filedict,
             base_modalities=self.base_modalities,
+            include_label=self.load_labels,
         )
         case_data = self.full_volume_pipeline(case_input)
-        return {
-            "image": case_data["image"],
-            "label": case_data["label"],
-        }
+        result = {"image": case_data["image"]}
+        if self.load_labels:
+            result["label"] = case_data["label"]
+        return result
 
     def __getitem__(self, index):
         filedict = self.database[index]
         case_data = self._load_case_volume(filedict)
         image = case_data["image"]
+        if not self.load_labels:
+            if self.augmentation is not None:
+                raise LabelRequiredError(
+                    "ISLES26Dataset3D augmentation requires labels, but load_labels=False."
+                )
+            if self.transform:
+                image = self.transform(image)
+            return image, filedict["caseID"]
+
         label = case_data["label"]
 
         if self.augmentation is not None:
@@ -886,8 +951,14 @@ class ISLES26RandomPatches3D(torch.utils.data.Dataset):
         preprocessing_configs: Optional[Mapping[str, Any]] = None,
         aug_cfg=None,
         is_training=False,
+        load_labels: bool = True,
     ):
         super().__init__()
+        if not load_labels:
+            raise LabelRequiredError(
+                "ISLES26RandomPatches3D requires labels for label-guided random patch "
+                "sampling; load_labels=False is unsupported."
+            )
         self.directory = os.path.expanduser(str(directory))
         self.datalist_json = datalist_json
         self.fold = int(fold)
@@ -1074,6 +1145,7 @@ class ISLES26Dataset2D(torch.utils.data.Dataset):
         aug_cfg=None,
         is_training=False,
         preprocessing_configs: Optional[Mapping[str, Any]] = None,
+        load_labels: bool = True,
     ):
         super().__init__()
         self.directory = os.path.expanduser(str(directory))
@@ -1081,6 +1153,7 @@ class ISLES26Dataset2D(torch.utils.data.Dataset):
         self.fold = int(fold)
         self.transform = transform
         self.test_flag = bool(test_flag)
+        self.load_labels = bool(load_labels)
         self.subset_name = (
             str(subset_name).strip()
             if subset_name is not None
@@ -1101,6 +1174,7 @@ class ISLES26Dataset2D(torch.utils.data.Dataset):
             subset_name=self.subset_name,
             partitioning=self.partitioning,
             subset_definitions=self.subset_definitions,
+            load_labels=self.load_labels,
         )
 
         self.all_slices = []
@@ -1135,6 +1209,7 @@ class ISLES26Dataset2D(torch.utils.data.Dataset):
         self.case_pipeline = build_online_slices_3d_to_2d_case_pipeline(
             modalities=self.modalities,
             preprocessing_configs=self.preprocessing_configs,
+            load_labels=self.load_labels,
         )
         self.image_slice_resize = Resize(
             spatial_size=self.slice_roi,
@@ -1195,12 +1270,13 @@ class ISLES26Dataset2D(torch.utils.data.Dataset):
         case_input = LoaderDataUtils.resolve_case_input_paths(
             filedict=filedict,
             base_modalities=self.base_modalities,
+            include_label=self.load_labels,
         )
         case_data = self.case_pipeline(case_input)
-        return {
-            "image": case_data["image"],
-            "label": case_data["label"],
-        }
+        result = {"image": case_data["image"]}
+        if self.load_labels:
+            result["label"] = case_data["label"]
+        return result
 
     def _build_slice_metadata(self, filedict: Mapping[str, Any], slice_idx: int) -> Dict[str, Any]:
         metadata = {
@@ -1239,14 +1315,29 @@ class ISLES26Dataset2D(torch.utils.data.Dataset):
             case_data = self._load_case_volume(filedict)
 
         image_volume = case_data["image"]
-        label_volume = case_data["label"]
 
         # image/label are [C, X, Y, Z] after common preprocessing.
         slice_dim = int(self.slice_axis) + 1
         image = image_volume.select(dim=slice_dim, index=int(slice_idx))
-        label = label_volume.select(dim=slice_dim, index=int(slice_idx))
-
         image = self.image_slice_resize(image)
+
+        virtual_path = ISLES26_VIRTUAL_PATH_TEMPLATE.format(
+            case_id=filedict["caseID"],
+            slice_idx=int(slice_idx),
+        )
+        if not self.load_labels:
+            if self.augmentation is not None:
+                raise LabelRequiredError(
+                    "ISLES26Dataset2D augmentation requires labels, but load_labels=False."
+                )
+            if self.transform:
+                image = self.transform(image)
+            if self.return_metadata:
+                return image, virtual_path, self._build_slice_metadata(filedict, slice_idx)
+            return image, virtual_path
+
+        label_volume = case_data["label"]
+        label = label_volume.select(dim=slice_dim, index=int(slice_idx))
         label = self.label_slice_resize(label)
 
         if self.augmentation is not None:
@@ -1261,16 +1352,25 @@ class ISLES26Dataset2D(torch.utils.data.Dataset):
             torch.set_rng_state(state)
             label = self.transform(label)
 
-        virtual_path = ISLES26_VIRTUAL_PATH_TEMPLATE.format(
-            case_id=filedict["caseID"],
-            slice_idx=int(slice_idx),
-        )
         if self.return_metadata:
             return image, label, virtual_path, self._build_slice_metadata(filedict, slice_idx)
         return image, label, virtual_path
 
 
 ISLES26OnlineProc2D = ISLES26Dataset2D
+
+
+def build_preprocessing_adapter():
+    """Build the registered deterministic ISLES26 preprocessing adapter."""
+    from src.data.loader_stack.preprocessing import DatasetPreprocessingAdapter
+
+    return DatasetPreprocessingAdapter(
+        dataset_id="isles26",
+        canonical_raw_modalities=ISLES26_SUPPORTED_MODALITY_KEYS,
+        build_full_volume_pipeline=build_full_volumes_3d_pipeline,
+        normalize_modalities=_normalize_modalities,
+        resolve_base_modality=_resolve_base_modality,
+    )
 
 
 def phase_marker() -> str:
@@ -1285,12 +1385,14 @@ __all__ = [
     "ISLES26_SUPPORTED_MODALITY_KEYS",
     "ISLES26_SUPPORTED_PREPROCESSING_KEYS",
     "ISLES26_REQUIRED_RECORD_KEYS",
+    "ISLES26_REQUIRED_LABELED_RECORD_KEYS",
     "ISLES26_OPTIONAL_RECORD_KEYS",
     "ISLES26_VIRTUAL_PATH_TEMPLATE",
     "ISLES26_PATCH_PATH_TEMPLATE",
     "build_common_preprocessed_volume_pipeline",
     "build_online_slices_3d_to_2d_case_pipeline",
     "build_full_volumes_3d_pipeline",
+    "build_preprocessing_adapter",
     "build_random_patches_3d_pipeline",
     "_normalize_modalities",
     "_normalize_case_record_paths",

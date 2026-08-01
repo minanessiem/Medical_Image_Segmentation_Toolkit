@@ -36,6 +36,43 @@ def _build_preprocessing_configs(image_size: int) -> dict:
 
 
 class TestIsles26Dataset3D(unittest.TestCase):
+    def test_label_free_val_dataset_is_independent_of_test_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            case_t1 = base / "case/t1.nii.gz"
+            _write_nifti(case_t1, np.arange(24, dtype=np.float32).reshape(3, 4, 2))
+            datalist_path = base / "isles26.json"
+            datalist_path.write_text(
+                json.dumps(
+                    {
+                        "training": [
+                            {
+                                "split": "val",
+                                "caseID": "case-label-free",
+                                "T1": "case/t1.nii.gz",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            dataset = ISLES26Dataset3D(
+                directory=str(base),
+                datalist_json=str(datalist_path),
+                subset_name="val",
+                modalities=["T1_RAW"],
+                test_flag=True,
+                load_labels=False,
+                preprocessing_configs=_build_preprocessing_configs(image_size=3),
+            )
+
+            image, case_id = dataset[0]
+            self.assertEqual(case_id, "case-label-free")
+            self.assertEqual(tuple(image.shape), (1, 3, 4, 2))
+            self.assertFalse(dataset.load_labels)
+            self.assertTrue(dataset.test_flag)
+
     def test_dataset3d_train_split_outputs_single_t1_channel(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

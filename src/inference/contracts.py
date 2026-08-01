@@ -144,6 +144,65 @@ class SpatialGeometry:
 
 
 @dataclass(frozen=True)
+class NativeImageMetadata:
+    """Immutable native NIfTI metadata captured before dataset preprocessing."""
+
+    canonical_key: str
+    shape: Tuple[int, int, int]
+    dtype: str
+    affine: Affine
+    spacing: Tuple[float, float, float]
+    orientation: str
+    qform: Optional[Affine]
+    sform: Optional[Affine]
+    qform_code: int
+    sform_code: int
+    source_reference: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.canonical_key, str) or not self.canonical_key.strip():
+            raise InferenceInputError(
+                "NativeImageMetadata.canonical_key must not be empty."
+            )
+        if not isinstance(self.dtype, str) or not self.dtype.strip():
+            raise InferenceInputError("NativeImageMetadata.dtype must not be empty.")
+        SpatialGeometry(
+            shape=self.shape,
+            affine=self.affine,
+            spacing=self.spacing,
+            orientation=self.orientation,
+        )
+        for field_name in ("qform", "sform"):
+            form = getattr(self, field_name)
+            if form is not None:
+                SpatialGeometry(
+                    shape=self.shape,
+                    affine=form,
+                    spacing=self.spacing,
+                    orientation=self.orientation,
+                )
+        for field_name in ("qform_code", "sform_code"):
+            code = getattr(self, field_name)
+            if isinstance(code, bool) or not isinstance(code, Integral) or code < 0:
+                raise InferenceInputError(
+                    f"NativeImageMetadata.{field_name} must be a non-negative integer."
+                )
+        if not isinstance(self.source_reference, str) or not self.source_reference.strip():
+            raise InferenceInputError(
+                "NativeImageMetadata.source_reference must not be empty."
+            )
+
+    @property
+    def geometry(self) -> SpatialGeometry:
+        return SpatialGeometry(
+            shape=self.shape,
+            affine=self.affine,
+            spacing=self.spacing,
+            orientation=self.orientation,
+        )
+
+
+@dataclass(frozen=True)
 class SpatialTrace:
     """Metadata required to relate the model grid to the original input grid."""
 
@@ -171,6 +230,8 @@ class PreprocessedCase:
     case_id: str
     image: torch.Tensor
     spatial_trace: SpatialTrace
+    native_metadata: Mapping[str, NativeImageMetadata] = field(default_factory=dict)
+    reference_key: Optional[str] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -193,8 +254,79 @@ class PreprocessedCase:
             raise InferenceInputError("PreprocessedCase.image must contain only finite values.")
         if not isinstance(self.spatial_trace, SpatialTrace):
             raise InferenceInputError("PreprocessedCase.spatial_trace must be SpatialTrace.")
+        if not isinstance(self.native_metadata, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, NativeImageMetadata)
+            for key, value in self.native_metadata.items()
+        ):
+            raise InferenceInputError(
+                "PreprocessedCase.native_metadata must map canonical keys to "
+                "NativeImageMetadata values."
+            )
+        if self.native_metadata:
+            if not isinstance(self.reference_key, str) or not self.reference_key.strip():
+                raise InferenceInputError(
+                    "PreprocessedCase.reference_key is required when native metadata is present."
+                )
+            if self.reference_key not in self.native_metadata:
+                raise InferenceInputError(
+                    f"PreprocessedCase.reference_key {self.reference_key!r} is absent from "
+                    "native_metadata."
+                )
+        elif self.reference_key is not None:
+            raise InferenceInputError(
+                "PreprocessedCase.reference_key requires native_metadata."
+            )
         if not isinstance(self.metadata, Mapping):
             raise InferenceInputError("PreprocessedCase.metadata must be a mapping.")
+
+
+@dataclass(frozen=True)
+class LabeledPreprocessedCase:
+    """A preprocessed inference case accompanied by model- and native-space labels."""
+
+    case: PreprocessedCase
+    model_label: torch.Tensor
+    native_label: torch.Tensor
+    native_label_metadata: NativeImageMetadata
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.case, PreprocessedCase):
+            raise InferenceInputError(
+                "LabeledPreprocessedCase.case must be a PreprocessedCase."
+            )
+        for field_name in ("model_label", "native_label"):
+            tensor = getattr(self, field_name)
+            if not torch.is_tensor(tensor) or tensor.ndim != 5:
+                raise InferenceInputError(
+                    f"LabeledPreprocessedCase.{field_name} must use [B,C,D,H,W] layout."
+                )
+            if not torch.is_floating_point(tensor):
+                raise InferenceInputError(
+                    f"LabeledPreprocessedCase.{field_name} must use a floating-point dtype."
+                )
+            if tensor.numel() == 0 or not bool(torch.isfinite(tensor).all().item()):
+                raise InferenceInputError(
+                    f"LabeledPreprocessedCase.{field_name} must be non-empty and finite."
+                )
+        if (
+            self.model_label.shape[0] != self.case.image.shape[0]
+            or tuple(self.model_label.shape[2:]) != tuple(self.case.image.shape[2:])
+        ):
+            raise InferenceInputError(
+                "LabeledPreprocessedCase.model_label must match the preprocessed image "
+                "batch and spatial shape."
+            )
+        if not isinstance(self.native_label_metadata, NativeImageMetadata):
+            raise InferenceInputError(
+                "LabeledPreprocessedCase.native_label_metadata must be NativeImageMetadata."
+            )
+        if tuple(int(value) for value in self.native_label.shape[2:]) != (
+            self.native_label_metadata.shape
+        ):
+            raise InferenceInputError(
+                "LabeledPreprocessedCase.native_label spatial shape must match "
+                "native_label_metadata."
+            )
 
 
 @dataclass(frozen=True)

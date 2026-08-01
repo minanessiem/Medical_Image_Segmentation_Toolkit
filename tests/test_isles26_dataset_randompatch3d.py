@@ -7,6 +7,7 @@ import nibabel as nib
 import numpy as np
 from omegaconf import OmegaConf
 
+from src.data.loader_stack.contracts import LabelRequiredError
 from src.data.loader_stack.isles26_loader import ISLES26RandomPatches3D
 
 
@@ -51,6 +52,16 @@ def _build_preprocessing_configs(
 
 
 class TestIsles26RandomPatches3D(unittest.TestCase):
+    def test_label_free_random_patch_construction_fails_immediately(self):
+        with self.assertRaisesRegex(LabelRequiredError, "requires labels"):
+            ISLES26RandomPatches3D(
+                directory=".",
+                datalist_json="unused.json",
+                modalities=["T1_RAW"],
+                load_labels=False,
+                preprocessing_configs={},
+            )
+
     def _prepare_datalist(self, base: Path) -> Path:
         case_a_t1 = base / "R001/sub-r001s001/ses-1/anat/t1_a.nii.gz"
         case_a_label = base / "R001/sub-r001s001/ses-1/anat/label_a.nii.gz"

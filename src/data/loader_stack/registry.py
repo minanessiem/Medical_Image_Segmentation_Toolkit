@@ -21,6 +21,7 @@ class DatasetCapabilities:
     supported_loader_modes: tuple[str, ...]
     loader_module: str
     implementation_state: str
+    preprocessing_adapter_factory: str | None = None
 
 
 DEFAULT_DATASET_REGISTRY: dict[str, DatasetCapabilities] = {
@@ -35,6 +36,9 @@ DEFAULT_DATASET_REGISTRY: dict[str, DatasetCapabilities] = {
         ),
         loader_module="src.data.loader_stack.isles24_loader",
         implementation_state="legacy-runtime",
+        preprocessing_adapter_factory=(
+            "src.data.loader_stack.isles24_loader:build_preprocessing_adapter"
+        ),
     ),
     # ISLES26 supports online slices, full volumes, and random volume patches.
     "isles26": DatasetCapabilities(
@@ -47,6 +51,9 @@ DEFAULT_DATASET_REGISTRY: dict[str, DatasetCapabilities] = {
         ),
         loader_module="src.data.loader_stack.isles26_loader",
         implementation_state="online-runtime",
+        preprocessing_adapter_factory=(
+            "src.data.loader_stack.isles26_loader:build_preprocessing_adapter"
+        ),
     ),
 }
 

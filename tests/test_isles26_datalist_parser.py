@@ -116,6 +116,41 @@ class TestIsles26DatalistParser(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must contain a list"):
                 datafold_read(datalist=str(datalist_path), basedir=str(base), subset_name="train")
 
+    def test_label_requirement_is_explicit_and_defaults_to_true(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            datalist_path = base / "dataset.json"
+            datalist_path.write_text(
+                json.dumps(
+                    {
+                        "training": [
+                            {
+                                "caseID": "case-label-free",
+                                "split": "val",
+                                "T1": "t1.nii.gz",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "label"):
+                datafold_read(
+                    datalist=str(datalist_path),
+                    basedir=str(base),
+                    subset_name="val",
+                )
+
+            records = datafold_read(
+                datalist=str(datalist_path),
+                basedir=str(base),
+                subset_name="val",
+                load_labels=False,
+            )
+            self.assertEqual(len(records), 1)
+            self.assertNotIn("label", records[0])
+
 
 if __name__ == "__main__":
     unittest.main()
