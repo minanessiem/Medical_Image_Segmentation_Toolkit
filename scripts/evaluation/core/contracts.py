@@ -10,6 +10,7 @@ These dataclasses are intentionally lightweight and focused on:
 from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Optional
 
+import numpy as np
 from torch import Tensor
 
 from src.inference.contracts import SUPPORTED_OUTPUT_SPACES, SpatialGeometry
@@ -150,7 +151,7 @@ class ScopedRunningStats:
 @dataclass
 class VolumeSample:
     """
-    One reconstructed 3D volume sample assembled from slice-level samples.
+    One spatially declared 3D prediction/reference pair.
 
     Tensors are expected in channel-first format [C, H, W, D].
     """
@@ -159,10 +160,10 @@ class VolumeSample:
     volume_id: str
     prediction_volume: Tensor
     ground_truth_volume: Tensor
-    prediction_space: Optional[str] = None
-    reference_space: Optional[str] = None
-    prediction_geometry: Optional[SpatialGeometry] = None
-    reference_geometry: Optional[SpatialGeometry] = None
+    prediction_space: str
+    reference_space: str
+    prediction_geometry: SpatialGeometry
+    reference_geometry: SpatialGeometry
     metadata: Dict[str, object] = field(default_factory=dict)
 
     def validate(self) -> None:
@@ -185,46 +186,79 @@ class VolumeSample:
                 f"pred={tuple(self.prediction_volume.shape)} "
                 f"gt={tuple(self.ground_truth_volume.shape)}."
             )
-        spatial_fields = (
-            self.prediction_space,
-            self.reference_space,
-            self.prediction_geometry,
-            self.reference_geometry,
+        if self.prediction_space not in SUPPORTED_OUTPUT_SPACES:
+            raise ValueError(
+                "VolumeSample prediction_space must be one of "
+                f"{sorted(SUPPORTED_OUTPUT_SPACES)}, got {self.prediction_space!r}."
+            )
+        if self.reference_space not in SUPPORTED_OUTPUT_SPACES:
+            raise ValueError(
+                "VolumeSample reference_space must be one of "
+                f"{sorted(SUPPORTED_OUTPUT_SPACES)}, got {self.reference_space!r}."
+            )
+        if not isinstance(self.prediction_geometry, SpatialGeometry):
+            raise ValueError(
+                "VolumeSample prediction_geometry must be a SpatialGeometry; "
+                "geometry is mandatory for 3D evaluation."
+            )
+        if not isinstance(self.reference_geometry, SpatialGeometry):
+            raise ValueError(
+                "VolumeSample reference_geometry must be a SpatialGeometry; "
+                "geometry is mandatory for 3D evaluation."
+            )
+        if self.prediction_space != self.reference_space:
+            raise ValueError(
+                "VolumeSample prediction/reference space mismatch: "
+                f"prediction={self.prediction_space!r}, "
+                f"reference={self.reference_space!r}."
+            )
+
+        prediction_shape = tuple(
+            int(value) for value in self.prediction_volume.shape[-3:]
         )
-        if any(value is not None for value in spatial_fields):
-            if any(value is None for value in spatial_fields):
-                raise ValueError(
-                    "VolumeSample spatial contract requires prediction/reference "
-                    "space and geometry together."
-                )
-            assert self.prediction_space is not None
-            assert self.reference_space is not None
-            assert self.prediction_geometry is not None
-            assert self.reference_geometry is not None
-            if self.prediction_space not in SUPPORTED_OUTPUT_SPACES:
-                raise ValueError(
-                    "VolumeSample prediction_space must be one of "
-                    f"{sorted(SUPPORTED_OUTPUT_SPACES)}, got {self.prediction_space!r}."
-                )
-            if self.reference_space not in SUPPORTED_OUTPUT_SPACES:
-                raise ValueError(
-                    "VolumeSample reference_space must be one of "
-                    f"{sorted(SUPPORTED_OUTPUT_SPACES)}, got {self.reference_space!r}."
-                )
-            if self.prediction_space != self.reference_space:
-                raise ValueError(
-                    "VolumeSample prediction/reference space mismatch: "
-                    f"prediction={self.prediction_space!r}, "
-                    f"reference={self.reference_space!r}."
-                )
-            expected_shape = tuple(int(value) for value in self.prediction_volume.shape[-3:])
-            if self.prediction_geometry.shape != expected_shape:
-                raise ValueError(
-                    "VolumeSample prediction tensor/geometry shape mismatch: "
-                    f"tensor={expected_shape}, geometry={self.prediction_geometry.shape}."
-                )
-            if self.reference_geometry.shape != expected_shape:
-                raise ValueError(
-                    "VolumeSample reference tensor/geometry shape mismatch: "
-                    f"tensor={expected_shape}, geometry={self.reference_geometry.shape}."
-                )
+        reference_shape = tuple(
+            int(value) for value in self.ground_truth_volume.shape[-3:]
+        )
+        if self.prediction_geometry.shape != prediction_shape:
+            raise ValueError(
+                "VolumeSample prediction tensor/geometry shape mismatch: "
+                f"tensor={prediction_shape}, geometry={self.prediction_geometry.shape}."
+            )
+        if self.reference_geometry.shape != reference_shape:
+            raise ValueError(
+                "VolumeSample reference tensor/geometry shape mismatch: "
+                f"tensor={reference_shape}, geometry={self.reference_geometry.shape}."
+            )
+        if self.prediction_geometry.shape != self.reference_geometry.shape:
+            raise ValueError(
+                "VolumeSample prediction/reference geometry shape mismatch: "
+                f"prediction={self.prediction_geometry.shape}, "
+                f"reference={self.reference_geometry.shape}."
+            )
+        if not np.allclose(
+            np.asarray(self.prediction_geometry.affine, dtype=np.float64),
+            np.asarray(self.reference_geometry.affine, dtype=np.float64),
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        ):
+            raise ValueError(
+                "VolumeSample prediction/reference affine mismatch: equal tensor "
+                "shapes do not establish a shared physical grid."
+            )
+        if not np.allclose(
+            self.prediction_geometry.spacing,
+            self.reference_geometry.spacing,
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        ):
+            raise ValueError(
+                "VolumeSample prediction/reference spacing mismatch: "
+                f"prediction={self.prediction_geometry.spacing}, "
+                f"reference={self.reference_geometry.spacing}."
+            )
+        if self.prediction_geometry.orientation != self.reference_geometry.orientation:
+            raise ValueError(
+                "VolumeSample prediction/reference orientation mismatch: "
+                f"prediction={self.prediction_geometry.orientation!r}, "
+                f"reference={self.reference_geometry.orientation!r}."
+            )

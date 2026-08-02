@@ -51,6 +51,9 @@ class TestEvaluationModelConfig(unittest.TestCase):
         cfg = load_evaluation_config("default")
 
         self.assertEqual(cfg.evaluation.input_source, "live_model")
+        self.assertEqual(cfg.inference.output_space, "model_preprocessed")
+        self.assertEqual(cfg.inference.sliding_window.sw_batch_size, 1)
+        self.assertEqual(cfg.inference_runtime.profile, "native")
         self.assertEqual(cfg.evaluation.threshold_protocol.mode, "fixed")
         self.assertEqual(
             cfg.evaluation.threshold_protocol.primary.metric,
@@ -79,6 +82,28 @@ class TestEvaluationModelConfig(unittest.TestCase):
         self.assertEqual(merged.data_mode.dim, "3d")
         self.assertEqual(merged.evaluation.run_dir, "/runs/example")
         self.assertEqual(merged.evaluation.model_name, "best_model")
+
+    def test_explicit_evaluation_inference_replaces_saved_policy_as_a_whole(self):
+        run_cfg = OmegaConf.create(
+            {
+                "inference": {
+                    "output_space": "native_input",
+                    "stale_saved_field": "must_not_survive",
+                    "sliding_window": {"sw_batch_size": 4},
+                },
+                "validation": {"inference": {"mode": "direct"}},
+            }
+        )
+        eval_cfg = load_evaluation_config("default")
+
+        merged = merge_evaluation_config(run_cfg, eval_cfg)
+
+        self.assertEqual(merged.inference.output_space, "model_preprocessed")
+        self.assertEqual(merged.inference.sliding_window.sw_batch_size, 1)
+        self.assertIsNone(
+            OmegaConf.select(merged, "inference.stale_saved_field", default=None)
+        )
+        self.assertEqual(merged.validation.inference.mode, "direct")
 
     def test_apply_dotted_override(self):
         cfg = OmegaConf.create(
@@ -132,6 +157,21 @@ class TestEvaluationModelConfig(unittest.TestCase):
             updated.validation.metrics[0].name,
             "ThreeDMetricsAggregator",
         )
+
+    def test_apply_inference_group_override_replaces_complete_policy(self):
+        cfg = OmegaConf.create(
+            {
+                "inference": {
+                    "output_space": "model_preprocessed",
+                    "stale_field": True,
+                }
+            }
+        )
+
+        updated = apply_evaluation_overrides(cfg, ["inference=sliding_window_native"])
+
+        self.assertEqual(updated.inference.output_space, "native_input")
+        self.assertIsNone(OmegaConf.select(updated, "inference.stale_field", default=None))
 
     def test_resolve_default_output_dir(self):
         cfg = OmegaConf.create(

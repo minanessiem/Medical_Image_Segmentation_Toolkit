@@ -282,6 +282,7 @@ class DualLevelStreamingMetricsEngine:
         return finalized
 
     def _update_volume_states(self, volume_sample: VolumeSample) -> None:
+        volume_sample.validate()
         num_slices = int(volume_sample.metadata.get("num_slices", int(volume_sample.prediction_volume.shape[-1])))
         has_foreground = bool((volume_sample.ground_truth_volume > 0.5).sum() > 0)
         pred = volume_sample.prediction_volume
@@ -323,4 +324,3 @@ def get_scope_metric(
 ) -> Dict[str, float]:
     """Utility accessor for tests and downstream report adapters."""
     return finalized_results[threshold]["metrics"][metric_name][scope]
-

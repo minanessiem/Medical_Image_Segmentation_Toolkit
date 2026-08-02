@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-import torch
 from torch import Tensor
 
 from scripts.evaluation.core.contracts import SliceSample, VolumeSample
@@ -69,26 +68,16 @@ class VolumeAssembler:
 
     def finalize_volume(self, analysis_case_key: str, volume_id: str) -> Optional[VolumeSample]:
         key = (str(analysis_case_key), str(volume_id))
-        item_map = self._buffers.pop(key, None)
+        item_map = self._buffers.get(key)
         if not item_map:
             return None
-        ordered = [item_map[idx] for idx in sorted(item_map.keys())]
-        prediction_volume = _stack_ordered_slices([item.prediction_slice for item in ordered])
-        ground_truth_volume = _stack_ordered_slices([item.ground_truth_slice for item in ordered])
-        sample = VolumeSample(
-            case_id=ordered[0].case_id,
-            volume_id=str(volume_id),
-            prediction_volume=prediction_volume,
-            ground_truth_volume=ground_truth_volume,
-            metadata={
-                "analysis_case_key": str(analysis_case_key),
-                "num_slices": len(ordered),
-                "slice_indices": [item.slice_index for item in ordered],
-                "first_slice_metadata": dict(ordered[0].metadata),
-            },
+        raise ValueError(
+            "2D slice-to-volume assembly is not compatible with geometry-aware "
+            "evaluation. The deferred 2D reconstruction contract must provide "
+            "typed parent/model geometry, slice axis and placement, context-centre "
+            "semantics, and an invertible resize/preprocessing trace. VolumeAssembler "
+            "will not manufacture an affine or infer space from slice metadata."
         )
-        sample.validate()
-        return sample
 
     def finalize_case(self, analysis_case_key: str) -> List[VolumeSample]:
         """
@@ -136,18 +125,3 @@ def _ensure_channel_first_slice(tensor: Tensor) -> Tensor:
     raise ValueError(
         f"Expected 2D/3D slice tensor ([H,W] or [C,H,W]), got shape={tuple(tensor.shape)}."
     )
-
-
-def _stack_ordered_slices(slices: List[Tensor]) -> Tensor:
-    if not slices:
-        raise ValueError("Cannot stack empty slice list into a volume.")
-    reference_shape = tuple(slices[0].shape)
-    for idx, item in enumerate(slices):
-        if tuple(item.shape) != reference_shape:
-            raise ValueError(
-                "Inconsistent slice shape during volume stacking at position "
-                f"{idx}: expected={reference_shape} got={tuple(item.shape)}."
-            )
-    # [N, C, H, W] -> [C, H, W, N]
-    stacked = torch.stack(slices, dim=0)
-    return stacked.permute(1, 2, 3, 0).contiguous()

@@ -1,5 +1,10 @@
 # @package _global_
 
+defaults:
+  - /inference: sliding_window_model_space
+  - /inference_runtime: native
+  - _self_
+
 evaluation:
   input_source: live_model
   run_dir: null

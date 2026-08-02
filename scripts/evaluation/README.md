@@ -27,12 +27,19 @@ loads `<RUN_DIR>/.hydra/config.yaml`, merges an evaluation preset from
 `configs/evaluation/`, applies CLI `key=value` overrides, runs live validation
 inference through repository dataloaders, and writes JSON/CSV/text artifacts.
 
-Current first-class support is 3D discriminative volume evaluation and 2D
-discriminative slice-level evaluation. Current 3D non-discriminative diffusion
-is rejected with a capability error because the existing diffusion adapters are
-still 2D-shaped. The older
-`compute_segmentation_metrics_for_diffusionmodel_2d_predictions` entrypoint
-remains available for legacy 2D workflows.
+The canonical `evaluate_model` path supports geometry-aware 3D discriminative
+volume evaluation. Every prediction/reference pair must declare the same
+`model_preprocessed` or `native_input` space and matching shape, affine,
+spacing, and orientation before metrics run. Repository-model `native_input`
+evaluation remains blocked until spatial restoration lands in Cut 7.
+
+Repository and nnU-Net 2D slice paths do not currently carry enough typed
+parent-volume geometry and reconstruction information to make a truthful 3D
+spatial claim. They therefore fail when a volume would be assembled. The
+deferred 2D task must define slice placement and invertible preprocessing before
+those paths can re-enter geometry-aware volume evaluation. Current 3D
+non-discriminative diffusion is likewise rejected with a capability error;
+future support must register a compatible `ProbabilityPredictor`.
 
 ## Package layout
 
@@ -83,17 +90,18 @@ scripts/evaluation/
 
 ### Config-driven repository-model flags
 
-- `--evaluation-config-name default|fixed_threshold|threshold_sweep|threshold_sweep_with_oracle|threshold_sweep_with_oracle_slice`
+- `--evaluation-config-name default|fixed_threshold|threshold_sweep|threshold_sweep_with_oracle`
 - Required overrides for normal use:
   - `evaluation.run_dir=<RUN_DIR>`
   - `evaluation.model_name=<MODEL_NAME>`
 - Common overrides:
   - `dataset.active_subsets.val=val_fast|val_full`
-  - `validation=default` for 2D slice analysis
   - `validation=sliding_window_3d_metrics_subset|sliding_window_3d_metrics_full` for 3D volume analysis
-  - `evaluation.levels=[slice]|[volume]`
+  - `inference=sliding_window_model_space` to select a complete shared prediction policy
+  - `inference_runtime=native` for ordinary Python execution outside a container
+  - `evaluation.levels=[volume]`
   - `evaluation.threshold_protocol.mode=fixed|sweep|oracle_per_case|sweep_with_oracle`
-  - `evaluation.threshold_protocol.primary.metric=Dice2DForegroundOnly|DiceNativeCoefficient|...`
+  - `evaluation.threshold_protocol.primary.metric=DiceNativeCoefficient|...`
   - `evaluation.output_dir=<OUTPUT_DIR>`
   - `evaluation.device=cpu|cuda|cuda:0`
 
@@ -144,19 +152,18 @@ For config-driven repository-model evaluation, outputs include:
 - `canonical_results.json`
 - `evaluation_summary.txt`
 - `resolved_evaluation_config.yaml`
-- `slice_metrics_per_threshold.csv` for slice-level analysis
 - `volume_metrics_per_threshold.csv` for volume-level analysis
 - `per_case_threshold_metrics.csv`
 - `oracle_per_case_thresholds.csv` when oracle mode is enabled
 
-For legacy 2D analysis cases (or one default case for nnU-Net), outputs include:
+`canonical_results.json` also records producer type, selected checkpoint,
+runtime profile, winning inference-policy source, threshold protocol, and each
+case's verified prediction/reference space and geometry. The resolved
+evaluation config contains the complete top-level `inference` and
+`inference_runtime` policies. `evaluation.input_source` selects the producer; it
+does not select the runtime profile.
 
-- `canonical_results.json`
-- `metrics_per_threshold.csv` (slice-level)
-- `volume_metrics_per_threshold.csv` (volume-level)
-- `evaluation_summary.txt`
-
-If export is enabled:
+For an explicitly geometry-declared 3D `VolumeSample`, NIfTI export writes:
 - `reconstructed_volumes/<analysis_case_key>/<volume_id>__pred.nii.gz`
 - `reconstructed_volumes/<analysis_case_key>/<volume_id>__gt.nii.gz`
 
@@ -184,22 +191,9 @@ python3 -m scripts.evaluation.evaluate_model \
   validation.val_batch_size=1
 ```
 
-Run a 2D slice-level validation sweep with per-slice oracle analysis:
-
-```bash
-python3 -m scripts.evaluation.evaluate_model \
-  --evaluation-config-name threshold_sweep_with_oracle_slice \
-  evaluation.run_dir='./outputs/<2d_swinunetr_run>' \
-  evaluation.model_name=diffusion_chkpt_step_000010 \
-  dataset.active_subsets.val=val_fast \
-  validation=default \
-  validation.val_batch_size=4
-```
-
-2D evaluation reports use metric class-name labels such as
-`Dice2DForegroundOnly` and `VoxelF1Score2D`. Validation aliases like
-`dice_2d_fg` are accepted as input selectors when they come from validation
-configs, but reports and CSVs keep the class-name labels.
+The former 2D `evaluate_model` example is intentionally omitted: 2D inputs now
+raise the deferred reconstruction-contract error before geometry-aware
+assessment.
 
 ### Repository-trained model via SLURM runner
 
@@ -268,4 +262,3 @@ python3 -m scripts.evaluation.slurm_runners.run_compute_segmentation_metrics_for
   --fixed-threshold 0.5 \
   --export-reconstructed-volumes
 ```
-

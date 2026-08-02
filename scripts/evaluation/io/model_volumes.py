@@ -1,12 +1,12 @@
-"""
-Live repository-model IO producer for native 3D volume evaluation.
-"""
+"""Live repository-model producer for geometry-aware 3D evaluation."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Any, Dict, Optional, Tuple
 
+import nibabel as nib
+import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from scripts.evaluation.core.contracts import VolumeSample
 from scripts.evaluation.core.model_loader import is_discriminative_config, resolve_diffusion_type
+from src.inference.contracts import SpatialGeometry
 from src.inference.pipeline import build_model_probability_executor
 
 
@@ -28,14 +29,20 @@ def validate_model_evaluation_mode(cfg: DictConfig) -> None:
     diffusion_type = resolve_diffusion_type(cfg)
 
     if data_dim == "2d":
-        return
+        raise ValueError(
+            "Geometry-aware repository-model evaluation supports 3D volumes only. "
+            "The deferred 2D reconstruction contract must define parent-volume "
+            "geometry, slice placement, and inverse resize/preprocessing before "
+            "2D samples can enter volume assessment."
+        )
     if data_dim == "3d" and is_discriminative_config(cfg):
         return
     if data_dim == "3d":
         raise ValueError(
             "3D live-model evaluation currently supports discriminative adapters only. "
             f"Got diffusion.type='{diffusion_type}'. Current non-discriminative diffusion "
-            "adapters are 2D-shaped and do not satisfy the 3D volume inference contract."
+            "adapters are 2D-shaped and do not satisfy the 3D volume inference contract. "
+            "A future generative backend must register a compatible ProbabilityPredictor."
         )
     raise ValueError(
         "Unsupported data_mode.dim for model evaluation. "
@@ -66,23 +73,24 @@ def iter_model_volume_samples(
     total_batches = _safe_len(dataloader)
     batch_iterable = _wrap_with_progress(dataloader, total_batches, show_progress)
     loader_mode = str(OmegaConf.select(cfg, "data_mode.loader_mode", default="") or "")
-    validation_mode = str(
-        OmegaConf.select(cfg, "validation.inference.mode", default="direct") or "direct"
-    )
     subset = OmegaConf.select(cfg, "dataset.active_subsets.val", default=None)
+    policy = inferer.policy
+    policy_source = str(inferer.policy_source)
 
     yielded = 0
     model.eval()
     with torch.no_grad():
         for batch_index, batch in enumerate(batch_iterable):
             image, label, sample_ids, metas = _unpack_batch(batch)
+            input_geometries = _resolve_batch_geometries(image, "image")
+            label_geometries = _resolve_batch_geometries(label, "label")
             image = image.to(resolved_device)
             prediction = inferer(
                 image,
                 progress_label=_resolve_batch_label(sample_ids, batch_index),
                 show_window_progress=show_progress,
             )
-            probabilities = normalize_probability_prediction(prediction)
+            probabilities = prediction.detach().cpu()
             labels = label.detach().float().cpu()
 
             batch_size = int(probabilities.shape[0])
@@ -108,8 +116,11 @@ def iter_model_volume_samples(
                     "batch_index": int(batch_index),
                     "item_index": int(item_index),
                     "loader_mode": loader_mode,
-                    "validation_inference_mode": validation_mode,
+                    "inference_policy_source": policy_source,
+                    "output_space": policy.output_space,
+                    "precision": policy.precision,
                     "shape": tuple(int(dim) for dim in pred_volume.shape),
+                    "reference_spacing_xyz": list(label_geometries[item_index].spacing),
                 }
                 if subset is not None:
                     metadata["subset"] = str(subset)
@@ -120,21 +131,15 @@ def iter_model_volume_samples(
                     volume_id=case_id,
                     prediction_volume=pred_volume,
                     ground_truth_volume=gt_volume,
+                    prediction_space=policy.output_space,
+                    reference_space=policy.output_space,
+                    prediction_geometry=input_geometries[item_index],
+                    reference_geometry=label_geometries[item_index],
                     metadata=metadata,
                 )
                 sample.validate()
                 yield sample
                 yielded += 1
-
-
-def normalize_probability_prediction(prediction: Tensor) -> Tensor:
-    """
-    Normalize model output to CPU probabilities in ``[0, 1]``.
-    """
-    pred = prediction.detach().float()
-    if pred.min() < 0 or pred.max() > 1:
-        pred = torch.sigmoid(pred)
-    return pred.clamp(0, 1).cpu()
 
 
 def resolve_batch_item_identity(
@@ -176,9 +181,9 @@ def _unpack_batch(
 
 def _ensure_channel_first_volume(volume: Tensor) -> Tensor:
     if volume.ndim == 4:
-        return volume.detach().float().cpu()
+        return volume.detach().cpu()
     if volume.ndim == 3:
-        return volume.detach().float().cpu().unsqueeze(0)
+        return volume.detach().cpu().unsqueeze(0)
     raise ValueError(
         "Expected item volume tensor to be 3D [H,W,D] or 4D [C,H,W,D], "
         f"got shape={tuple(volume.shape)}."
@@ -204,6 +209,49 @@ def _resolve_item_meta(metas: object, item_index: int) -> Dict[str, object]:
     if isinstance(item_value, Mapping):
         return {str(key): _metadata_value_to_python(value) for key, value in item_value.items()}
     return {}
+
+
+def _resolve_batch_geometries(tensor: Tensor, field_name: str) -> Tuple[SpatialGeometry, ...]:
+    if tensor.ndim != 5:
+        raise ValueError(
+            f"Repository-model {field_name} batch must use [B,C,H,W,D], "
+            f"got shape={tuple(tensor.shape)}."
+        )
+    raw_affine = getattr(tensor, "affine", None)
+    if raw_affine is None:
+        raise ValueError(
+            f"Repository-model {field_name} batch has no MONAI affine metadata. "
+            "Geometry-aware evaluation requires preprocessing to preserve each "
+            "case's transformed-grid affine."
+        )
+    affine_batch = np.asarray(
+        torch.as_tensor(raw_affine).detach().cpu(),
+        dtype=np.float64,
+    )
+    batch_size = int(tensor.shape[0])
+    if affine_batch.shape == (4, 4):
+        if batch_size != 1:
+            raise ValueError(
+                f"Repository-model {field_name} batch contains {batch_size} cases but "
+                "only one affine. Per-case geometry is required."
+            )
+        affine_batch = affine_batch[None, ...]
+    if affine_batch.shape != (batch_size, 4, 4):
+        raise ValueError(
+            f"Repository-model {field_name} affine metadata must have shape [B,4,4], "
+            f"got {tuple(affine_batch.shape)} for batch size {batch_size}."
+        )
+
+    spatial_shape = tuple(int(value) for value in tensor.shape[-3:])
+    return tuple(
+        SpatialGeometry(
+            shape=spatial_shape,
+            affine=tuple(tuple(float(value) for value in row) for row in affine),
+            spacing=tuple(float(value) for value in nib.affines.voxel_sizes(affine)),
+            orientation="".join(str(code) for code in nib.aff2axcodes(affine)),
+        )
+        for affine in affine_batch
+    )
 
 
 def _index_collated_value(value: object, item_index: int) -> Optional[object]:

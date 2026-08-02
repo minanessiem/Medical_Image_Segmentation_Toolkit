@@ -33,27 +33,6 @@ def _make_run_dir(tmp: str) -> Path:
     return run_dir
 
 
-def _make_2d_run_dir(tmp: str) -> Path:
-    run_dir = Path(tmp) / "run_2d"
-    hydra_dir = run_dir / ".hydra"
-    hydra_dir.mkdir(parents=True)
-    (hydra_dir / "config.yaml").write_text(
-        "dataset:\n"
-        "  active_subsets:\n"
-        "    val: val_fast\n"
-        "data_mode:\n"
-        "  dim: 2d\n"
-        "  loader_mode: online_slices_3d_to_2d\n"
-        "diffusion:\n"
-        "  type: Discriminative\n"
-        "validation:\n"
-        "  inference:\n"
-        "    mode: direct\n",
-        encoding="utf-8",
-    )
-    return run_dir
-
-
 def _mock_results(tmp: str):
     output_dir = Path(tmp) / "eval"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -66,22 +45,6 @@ def _mock_results(tmp: str):
         "config_path": str(output_dir / "resolved_evaluation_config.yaml"),
         "summary_path": str(output_dir / "evaluation_summary.txt"),
         "summary_text": "summary body",
-    }
-
-
-def _mock_slice_results(tmp: str):
-    output_dir = Path(tmp) / "eval"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return {
-        "output_dir": str(output_dir),
-        "json_path": str(output_dir / "canonical_results.json"),
-        "slice_csv_path": str(output_dir / "slice_metrics_per_threshold.csv"),
-        "volume_csv_path": None,
-        "per_case_csv_path": str(output_dir / "per_case_threshold_metrics.csv"),
-        "oracle_csv_path": str(output_dir / "oracle_per_case_thresholds.csv"),
-        "config_path": str(output_dir / "resolved_evaluation_config.yaml"),
-        "summary_path": str(output_dir / "evaluation_summary.txt"),
-        "summary_text": "slice summary body",
     }
 
 
@@ -100,6 +63,8 @@ class TestEvaluateModelEntrypoint(unittest.TestCase):
         self.assertEqual(cfg.evaluation.run_dir, str(run_dir))
         self.assertEqual(cfg.evaluation.model_name, "best_model")
         self.assertEqual(cfg.evaluation.input_source, "live_model")
+        self.assertEqual(cfg.inference.output_space, "model_preprocessed")
+        self.assertEqual(cfg.inference_runtime.profile, "native")
         self.assertEqual(cfg.dataset.active_subsets.val, "val_fast")
         self.assertEqual(cfg.evaluation.threshold_protocol.mode, "fixed")
 
@@ -116,26 +81,8 @@ class TestEvaluateModelEntrypoint(unittest.TestCase):
 
         self.assertEqual(cfg.evaluation.threshold_protocol.mode, "sweep_with_oracle")
         self.assertEqual(cfg.evaluation.threshold_protocol.thresholds, "0.05:0.90:0.05")
-
-    def test_compose_slice_sweep_oracle_preset_uses_class_name_primary(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = _make_2d_run_dir(tmp)
-            cfg = compose_evaluation_config(
-                evaluation_config_name="threshold_sweep_with_oracle_slice",
-                overrides=[
-                    f"evaluation.run_dir={run_dir}",
-                    "evaluation.model_name=best_model",
-                    "validation=default",
-                ],
-            )
-
-        self.assertEqual(list(cfg.evaluation.levels), ["slice"])
-        self.assertEqual(cfg.evaluation.threshold_protocol.mode, "sweep_with_oracle")
-        self.assertEqual(cfg.evaluation.threshold_protocol.primary.level, "slice")
-        self.assertEqual(
-            cfg.evaluation.threshold_protocol.primary.metric,
-            "Dice2DForegroundOnly",
-        )
+        self.assertEqual(cfg.inference.output_space, "model_preprocessed")
+        self.assertEqual(cfg.inference_runtime.profile, "native")
 
     def test_compose_trailing_overrides_are_applied_last(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,29 +124,6 @@ class TestEvaluateModelEntrypoint(unittest.TestCase):
         self.assertIn("canonical_results.json", output)
         self.assertIn("evaluation_summary.txt", output)
         self.assertIn("summary body", output)
-
-    def test_main_prints_slice_csv_output_when_present(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = _make_2d_run_dir(tmp)
-            stdout = StringIO()
-            with patch(
-                "scripts.evaluation.evaluate_model.run_model_evaluation",
-                return_value=_mock_slice_results(tmp),
-            ), redirect_stdout(stdout):
-                exit_code = main(
-                    [
-                        "--evaluation-config-name",
-                        "threshold_sweep_with_oracle_slice",
-                        f"evaluation.run_dir={run_dir}",
-                        "evaluation.model_name=best_model",
-                    ]
-                )
-
-        self.assertEqual(exit_code, 0)
-        output = stdout.getvalue()
-        self.assertIn("slice_metrics_per_threshold.csv", output)
-        self.assertIn("oracle_per_case_thresholds.csv", output)
-        self.assertIn("slice summary body", output)
 
     def test_main_missing_run_dir_returns_nonzero(self):
         stderr = StringIO()

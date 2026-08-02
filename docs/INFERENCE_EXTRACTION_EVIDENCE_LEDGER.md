@@ -11,9 +11,11 @@ source state was tested, what was observed, and what the result proves.
 final Cut 1 contract, E009 the transition-only Cut 2 model-loading parity, and
 E010 the current Cut 3 preprocessing snapshot. E011 records the Cut 4 shared
 probability-execution contracts, and E012 records its real-model Desktop FP32
-parity together with the unresolved FP16 finding. E002-E006 and E008 are
-retained only as compact supersession records because they do not represent
-accepted current designs.
+parity together with the unresolved FP16 finding. E013 records the accepted
+Cut-5 nnU-Net precursor, and E014 records the accepted Cut 5 evaluator and its
+live repository-model/nnU-Net evidence. E002-E006 and E008 are retained only
+as compact supersession records because they do not represent accepted current
+designs.
 
 ## Operating rule
 
@@ -255,6 +257,74 @@ compliant 3D producer and changes only the common evaluator package. Previously
 generated spatially transformed nnU-Net datasets are not certified merely by
 adding the config key; they require inspection and should be regenerated if
 their arrays were written with stale source affines.
+
+### O007: Paired model-space image/reference grids are not yet authoritative
+
+Cut 5 live validation exposed a preprocessing issue that had previously been
+hidden by the evaluation path's loss of spatial metadata. The historical
+ISLES26 pipeline transforms the image and label independently and later treats
+their tensors as index-aligned. For most cases this produces matching grids,
+but it does not guarantee that both outputs share one exact physical target
+grid. Cut 5 now retains the metadata long enough to reject that unsupported
+assumption before calculating metrics.
+
+A complete data-loader-only audit of the 64-case `val_fast` split found two
+model-space mismatches:
+
+- `sub-r065s005`: the raw image and label have the same
+  `[184, 512, 512]` shape and nominal `(0.9993909, 0.5, 0.5)` mm spacing. Their
+  raw affines agree at the evaluator tolerance (`2.98e-8` maximum difference),
+  but a tiny direction-matrix difference is amplified when orientation and
+  spacing are applied independently. Both transformed arrays have shape
+  `[184, 257, 256]` and RAS orientation, while their transformed affines differ
+  by as much as `0.4835456` mm.
+- `sub-r069s031`: the raw image and label have the same
+  `[160, 224, 224]` shape and nominal spacing, but their raw affines already
+  differ by approximately `0.0007935` mm. The independently transformed
+  `[160, 230, 230]` RAS grids retain a maximum affine difference of
+  approximately `0.0007941` mm.
+
+This evidence does not establish mistaken lesion annotation. It establishes a
+header/grid and independent-resampling problem: equal shapes and nearly equal
+source headers are insufficient to prove that separately transformed arrays
+occupy the same model-space grid. Merely copying the image affine onto the
+label, loosening evaluator tolerances, or ignoring the mismatch would conceal
+rather than correct the spatial relationship.
+
+The accepted future solution is to make the transformed image grid the single
+authoritative model-space target grid for each case:
+
+1. Apply the trained image orientation/spacing preprocessing and capture its
+   exact resulting shape and affine.
+2. Resample the untouched native label directly onto that exact target grid
+   with nearest-neighbour interpolation.
+3. Preserve the untouched native label and native image metadata separately;
+   do not rewrite an affine without resampling voxel values.
+4. Require the resulting model-space image and label to have identical shape
+   and physical geometry before metrics.
+5. Continue to use the image transform trace as the authority when Cut 7
+   restores floating-point predictions to `native_input` space.
+
+This is justified because the model consumes the transformed image grid, so
+that grid is the only defensible reference for model-space labels and
+predictions. Nearest-neighbour interpolation preserves discrete label values,
+while direct resampling from the native label avoids compounding interpolation
+through an intermediate independently chosen grid.
+
+Before changing production preprocessing, the follow-up must characterize the
+full dataset, compare old and corrected masks (changed voxels, Dice, lesion
+volume, and visual alignment for affected cases), prove that image tensors and
+model prediction hashes are unchanged, and rerun the complete evaluation split.
+The strict Cut 5 geometry rejection must remain in place. Its error should also
+be enhanced later with the case identifier and compared affine values.
+
+This remediation is deliberately deferred. Blind Grand Challenge inference has
+no reference label and therefore does not encounter this paired-reference-grid
+problem; it does not block the basic container-generation path or the current
+competition test phase. It does block claiming complete, scientifically
+certified model-space evaluation for affected cases and must be resolved before
+full-dataset spatial certification or final Cut 7 native-space certification.
+The exact Desktop evidence and hashes are recorded in E014.
 
 ---
 
@@ -1188,6 +1258,214 @@ dataset conversion, nnU-Net planning/training/prediction, 2D reconstruction,
 or the finalized Cut 5 evaluator. Changes to conversion transforms, exporter
 geometry handling, spatial contracts, MONAI/nibabel versions, or the six 3D
 conversion presets require this evidence to be rerun.
+
+---
+
+## Evidence item E014: Cut 5 geometry-aware offline evaluation
+
+### Status and question
+
+| Field | Value |
+|---|---|
+| Evidence ID | `E014` |
+| Status | `ACCEPTED` for Cut 5 Desktop repository-model and 3D nnU-Net evaluation |
+| Base commit | `215801e1813b63ad48ed14aff1c76562b06bdc1b` plus the uncommitted Cut 5 diff |
+| Deferred finding | O007 paired model-space reference-grid remediation |
+
+E014 asks whether the post-training evaluator now uses the shared inference
+policy/runtime and shared probability executor for a live 3D repository model,
+requires explicit result/reference space and verified geometry, produces
+metrics and reports from the verified common grid, accepts compliant native and
+model-preprocessed 3D nnU-Net volumes, and fails rather than assessing a pair
+whose physical grids disagree.
+
+### Pinned model, config, and input state
+
+The Desktop run used the same p5n1 3D DynUNet model as E001 and E012. The files
+were copied from LRZ and verified after transfer:
+
+```text
+saved resolved config
+7152715bded1f11cc244a8a4270b6cc592b8a0e555f40d6d40af5b2924cc918a
+
+saved overrides
+6cdd2234aae0716431c17287dd35f6d3f2ebaf1211470e1ed8896c5df4761f30
+
+best_model_step_040000_dice_3d_0.5724.pth
+120c93ee6a32f79829bf8a6b2d3ab7db59861f865ad1e8a37889f87ab0c82441
+
+four-case focused split
+e977975bd82c9f123b89651f6a58a1b4b42c34b05d1c65521f145098047272e7
+```
+
+The four locked cases were `sub-r004s006`, `sub-r035s015`, `sub-r041s108`,
+and `sub-r049s033`. The composed evaluation used the `native` runtime, an
+explicit top-level `sliding_window_model_space` policy, FP32, ROI
+`128x128x128` resolved from the model config, case/window batch one, overlap
+`0.5`, Gaussian blending, constant padding, and fixed threshold `0.5`. The
+recorded policy source was `explicit_top_level`; the post-training evaluation
+policy superseded the saved training-validation policy rather than field-
+merging with it.
+
+### Execution environment and command scope
+
+Execution used the isolated Desktop WSL worktree
+`cut5_20260802a`, Python 3.10.12 from `MedSegDiff_env`, and an NVIDIA GeForce
+RTX 4070 Ti SUPER with 16,376 MiB reported VRAM. The live repository-model run
+used the ordinary `scripts.evaluation.evaluate_model` entrypoint with the
+pinned model directory, checkpoint, focused split, and explicit Cut 5
+evaluation/inference overrides.
+
+Before live execution, the Cut 5 snapshot passed these Desktop test groups:
+
+- 82 focused inference/evaluation contract tests;
+- 81 remaining evaluation tests;
+- 75 shared-inference and 3D-loader tests;
+- a final 47-test focused rerun after integration review.
+
+These groups overlap and must not be summed as a unique test count.
+`git diff --check` also passed for the Cut 5 source diff.
+
+The 3D nnU-Net evaluator was exercised with isolated prediction/reference
+fixtures copied from the accepted E013 bounded conversions. No trained nnU-Net
+model was required because Cut 5 concerns ingestion and assessment of already
+produced prediction volumes, not nnU-Net training or prediction correctness.
+
+### Result and durable artifacts
+
+#### Live repository-model evaluation
+
+All four locked volumes completed through the public evaluator. Each reported
+matching prediction/reference shapes, affines, spacing, orientation, and
+`model_preprocessed` space before metric calculation.
+
+| Case | Cut 5 Dice | E001 Dice | Delta |
+|---|---:|---:|---:|
+| `sub-r004s006` | `0.5875658393` | `0.5876157284` | approximately `-4.99e-5` |
+| `sub-r035s015` | `0.7961137891` | `0.7961222529` | approximately `-8.46e-6` |
+| `sub-r041s108` | `0.0` | `0.0` | `0.0` |
+| `sub-r049s033` | `0.6826347113` | `0.6826347113` | `0.0` |
+
+The Cut 5 mean Dice was `0.5165785849`, compared with E001's
+`0.5165931731` (approximately `-1.46e-5`). E001 ran on LRZ/V100 while E014 ran
+on the Desktop/RTX 4070 Ti SUPER; per the existing project decision, this small
+cross-hardware difference is not treated as a parity failure.
+
+Durable hashes from `cut5_live_artifacts/evaluation_output_locked4`:
+
+```text
+canonical_results.json
+4e79edd968954c006fa62308f4e17408dd5a3b39f883bd0cdc853cff66f5a36d
+
+volume_metrics CSV
+e277f5aaff58a78e2b254a136be3b3bd401c0e83b6b484a3f49ba39d169728c2
+
+per-case CSV
+eb3390046467f85bb652ae3940a59f6b933b825035a2dfe1e2485db5cff6f10d
+
+resolved evaluation config
+86f465fa9f27bb05247fd29090dfef74eb21791131b284bf57ecd4138b69119d
+
+evaluation summary
+0c3db4ee2fd11f32d9de48e064e515280fd8b62094dcf9f309e5a90dc5fa13a0
+
+four-case live log
+6d3e751504413cc3a3324e6a7855600db1c127c9aac042f34f438fb4c567ccc1
+```
+
+#### Strict spatial failure and O007 diagnosis
+
+A broader 64-case `val_fast` run completed 59 volumes and then stopped at
+`sub-r065s005` with the intended error:
+
+```text
+VolumeSample prediction/reference affine mismatch: equal tensor shapes do not
+establish a shared physical grid.
+```
+
+A data-loader-only audit, which avoided rerunning model inference, examined all
+64 cases and found exactly the two mismatches documented in O007:
+`sub-r065s005` and `sub-r069s031`. The diagnostic record includes raw and
+transformed shapes, affines, spacing, orientation, and maximum affine deltas:
+
+```text
+geometry diagnosis JSON
+1cec0991e37a0f16bc4b7797fb624e5ff46e85d7a39de3c67e007bacd3c66a24
+
+E001 baseline manifest copied for comparison
+c2aec4acdadddc06d3f7fa71829474a28b06f72dfa458554e6cda45f59274c31
+```
+
+The failure is accepted evidence that Cut 5 enforces its spatial contract. It
+must not be converted into a tolerance fallback. O007 records the separate
+preprocessing remediation required for complete full-split certification.
+
+#### 3D nnU-Net producer/evaluator matrix
+
+The real 3D nnU-Net evaluation path produced these outcomes:
+
+- 10/10 `native_input` identity pairs succeeded with Dice and surface Dice
+  `1.0`, HD95 `0`, and absolute volume difference `0`;
+- 10/10 `model_preprocessed` identity pairs produced the same perfect metrics;
+- changing one foreground prediction to an empty mask while preserving its
+  geometry succeeded and reduced aggregate Dice to `0.9`, demonstrating that
+  image values, rather than filenames alone, were assessed;
+- shifting one prediction affine by 2 mm failed before the first volume was
+  assessed with an actionable affine-mismatch error.
+
+Fixture and log identifiers:
+
+```text
+fixture manifest
+334405b678c43795385aaf07863ceab8f1ae4537543ae55e442742795abdcf68
+
+native identity log
+ff86e06c0b1f0b58525a489b201fb07f523087cacfc6fd13cdebca4c2700da5b
+
+model-preprocessed identity log
+344e7fdf81b6b3d833bc7f899e0eb6ec8a51d727e3fba2a8fe432461bb5f7df1
+
+altered-mask log
+71a810135ae453727488180016b26c0931522050bee2dc4c7e30496ef63bf4b8
+
+bad-affine log
+fe6876d2c8535ba060967c91cea43a14b06ee7e8c6865c80cd3807cd654d61ae
+```
+
+The corresponding canonical-result hashes are
+`d43b42a671db19cc339327a946411084c8b605de66d974f17642af11a94cce75`
+for native identity,
+`cef03708717cf013794601ddc663851b1a6b195622d9539600670524eb7742b6`
+for model-preprocessed identity, and
+`754d67fabaa5135afffde53c75bf8d1d67b5f0f585c828f5430b7e17ca854dfb`
+for the altered-mask run.
+
+All E014 files remain preserved outside Git under:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/
+  cut5_20260802a/cut5_live_artifacts/
+```
+
+### Acceptance scope and invalidation
+
+E014 completes Cut 5 for its declared 3D scope. It establishes that the common
+post-training evaluator consumes the shared inference/runtime policy, assesses
+live repository-model and file-backed nnU-Net results through explicit space
+and geometry contracts, records the selected policy/space in its results, and
+rejects unsupported physical-grid mismatches before metrics. The O007 finding
+does not invalidate Cut 5: discovering and stopping at that mismatch is the
+new evaluator behaving correctly, and blind Grand Challenge inference does not
+load or compare a reference label.
+
+E014 does not certify 2D evaluation, complete 64-case ISLES26 model-space
+evaluation, corrected paired-grid preprocessing, native-space inversion,
+Grand Challenge transport/container behavior, T4 performance, native FP16, or
+the ten-minute case limit. Those remain governed by O004, O005, O007, Cut 7,
+and the later container/release cuts. Changes to the shared inference executor,
+evaluation contracts, result/reference geometry checks, producer adapters,
+model/checkpoint/config, or relevant MONAI/nibabel behavior require the
+corresponding evidence to be rerun.
 
 ---
 

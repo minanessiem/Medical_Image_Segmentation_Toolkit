@@ -23,6 +23,7 @@ PROJECT_ROOT = next(
 )
 CONFIG_ROOT = PROJECT_ROOT / "configs"
 RESOLVED_CONFIG_FILENAME = "resolved_evaluation_config.yaml"
+COMPLETE_POLICY_GROUPS = frozenset({"inference", "inference_runtime"})
 
 
 def load_run_config(run_dir: Path) -> DictConfig:
@@ -61,6 +62,15 @@ def merge_evaluation_config(run_cfg: DictConfig, eval_cfg: DictConfig) -> DictCo
     """
     base = _mutable_copy(run_cfg)
     merged = OmegaConf.merge(base, eval_cfg)
+    for group in COMPLETE_POLICY_GROUPS:
+        selected = OmegaConf.select(eval_cfg, group, default=None)
+        if selected is not None:
+            OmegaConf.update(
+                merged,
+                group,
+                OmegaConf.to_container(selected, resolve=False),
+                merge=False,
+            )
     OmegaConf.set_struct(merged, False)
     return merged
 
@@ -92,7 +102,20 @@ def apply_evaluation_overrides(
         if "." not in key:
             group_cfg = _try_load_config_group_override(key, value)
             if group_cfg is not None:
-                updated = OmegaConf.merge(updated, group_cfg)
+                if key in COMPLETE_POLICY_GROUPS:
+                    selected = OmegaConf.select(group_cfg, key, default=None)
+                    if selected is None:
+                        raise ValueError(
+                            f"Config group override {key}={value} did not define {key}."
+                        )
+                    OmegaConf.update(
+                        updated,
+                        key,
+                        OmegaConf.to_container(selected, resolve=False),
+                        merge=False,
+                    )
+                else:
+                    updated = OmegaConf.merge(updated, group_cfg)
                 OmegaConf.set_struct(updated, False)
                 continue
 

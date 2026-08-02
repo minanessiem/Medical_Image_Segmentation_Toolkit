@@ -11,7 +11,7 @@ from scripts.evaluation.metrics.engine import DualLevelStreamingMetricsEngine
 
 
 class TestDualLevelStreamingMetricsEngine(unittest.TestCase):
-    def test_streaming_volume_finalization_and_counts(self):
+    def test_volume_boundary_rejects_2d_reconstruction_without_geometry(self):
         engine = DualLevelStreamingMetricsEngine(
             thresholds=[0.5],
             volume_metric_names=["DiceNativeCoefficient"],
@@ -50,28 +50,10 @@ class TestDualLevelStreamingMetricsEngine(unittest.TestCase):
         finalized_midstream = engine.update(samples[1])
         self.assertEqual(len(finalized_midstream), 0)
 
-        # Volume boundary at next sample should flush first volume.
-        finalized_midstream = engine.update(samples[2])
-        self.assertEqual(len(finalized_midstream), 1)
-        self.assertEqual(finalized_midstream[0].volume_id, "sub-stroke0001")
-        self.assertEqual(finalized_midstream[0].metadata["num_slices"], 2)
-
-        # Flush trailing open volume.
-        trailing = engine.finalize_open_volumes()
-        self.assertEqual(len(trailing), 1)
-        self.assertEqual(trailing[0].volume_id, "sub-stroke0002")
-        self.assertEqual(trailing[0].metadata["num_slices"], 1)
-
-        finalized = engine.finalize()
-        slice_result = finalized["slice_level"][0.5]
-        volume_result = finalized["volume_level"][0.5]
-
-        self.assertEqual(slice_result["slice_counts"]["total"], 3)
-        self.assertEqual(volume_result["volume_counts"]["total"], 2)
-        self.assertEqual(volume_result["volume_slice_counts"]["total"], 3)
-        self.assertEqual(volume_result["volume_slice_counts"]["min"], 1)
-        self.assertEqual(volume_result["volume_slice_counts"]["max"], 2)
-        self.assertIn("DiceNativeCoefficient", volume_result["metrics"])
+        # The first volume boundary is the earliest point at which the old path
+        # would claim a reconstructed 3D grid.
+        with self.assertRaisesRegex(ValueError, "deferred 2D reconstruction contract"):
+            engine.update(samples[2])
 
 
 if __name__ == "__main__":

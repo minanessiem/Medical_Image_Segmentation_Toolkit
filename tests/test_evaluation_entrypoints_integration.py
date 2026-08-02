@@ -2,7 +2,6 @@
 Integration-style tests for evaluation entrypoints with dual-level outputs.
 """
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,25 +43,7 @@ class TestEvaluationEntrypointsIntegration(unittest.TestCase):
             ground_truth_mask=torch.tensor([[[1.0, 0.0], [0.0, 0.0]]], dtype=torch.float32),
         )
 
-    def _assert_volume_schema(self, payload_path: Path) -> None:
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-        self.assertIn("volume_level", payload["metrics"])
-        volume_threshold_results = payload["metrics"]["volume_level"]["threshold_results"]
-        self.assertGreaterEqual(len(volume_threshold_results), 1)
-        first = volume_threshold_results[0]
-        self.assertIn("volume_counts", first)
-        self.assertIn("volume_slice_counts", first)
-        for metric_name, metric_stats in first["metrics"].items():
-            self.assertNotIn(
-                "foreground_only",
-                metric_stats,
-                msg=f"Volume metric {metric_name} unexpectedly has foreground_only scope.",
-            )
-            self.assertIn("mean", metric_stats)
-            self.assertIn("std", metric_stats)
-            self.assertIn("count", metric_stats)
-
-    def test_nnunet_entrypoint_writes_volume_outputs(self):
+    def test_nnunet_2d_entrypoint_rejects_volume_reconstruction(self):
         from scripts.evaluation import compute_segmentation_metrics_for_nnunet_2d_predictions as entry
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,15 +80,14 @@ class TestEvaluationEntrypointsIntegration(unittest.TestCase):
             ), patch(
                 "scripts.evaluation.compute_segmentation_metrics_for_nnunet_2d_predictions.iter_nnunet_slice_samples",
                 return_value=iter(samples),
-            ), patch("sys.argv", argv):
+            ), patch("sys.argv", argv), self.assertRaisesRegex(
+                ValueError, "deferred 2D reconstruction contract"
+            ):
                 entry.main()
 
-            self.assertTrue((out_dir / "canonical_results.json").exists())
-            self.assertTrue((out_dir / "metrics_per_threshold.csv").exists())
-            self.assertTrue((out_dir / "volume_metrics_per_threshold.csv").exists())
-            self._assert_volume_schema(out_dir / "canonical_results.json")
+            self.assertFalse((out_dir / "canonical_results.json").exists())
 
-    def test_diffusion_entrypoint_writes_volume_outputs(self):
+    def test_repository_2d_entrypoint_rejects_volume_reconstruction(self):
         from scripts.evaluation import compute_segmentation_metrics_for_diffusionmodel_2d_predictions as entry
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -156,13 +136,12 @@ class TestEvaluationEntrypointsIntegration(unittest.TestCase):
             ), patch(
                 "scripts.evaluation.compute_segmentation_metrics_for_diffusionmodel_2d_predictions.iter_diffusion_case_slice_samples",
                 return_value=iter(yielded_samples),
-            ), patch("sys.argv", argv):
+            ), patch("sys.argv", argv), self.assertRaisesRegex(
+                ValueError, "deferred 2D reconstruction contract"
+            ):
                 entry.main()
 
-            self.assertTrue((out_dir / "canonical_results.json").exists())
-            self.assertTrue((out_dir / "metrics_per_threshold.csv").exists())
-            self.assertTrue((out_dir / "volume_metrics_per_threshold.csv").exists())
-            self._assert_volume_schema(out_dir / "canonical_results.json")
+            self.assertFalse((out_dir / "canonical_results.json").exists())
 
 
 if __name__ == "__main__":

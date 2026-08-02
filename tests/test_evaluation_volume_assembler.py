@@ -29,7 +29,7 @@ class TestVolumeAssembler(unittest.TestCase):
             ground_truth_mask=torch.full((1, 2, 2), fill_value=gt_value, dtype=torch.float32),
         )
 
-    def test_finalize_volume_orders_by_slice_index(self):
+    def test_finalize_volume_rejects_untyped_2d_reconstruction(self):
         assembler = VolumeAssembler()
         # Add out of order intentionally: 2, 0, 1
         assembler.add_sample(
@@ -51,15 +51,10 @@ class TestVolumeAssembler(unittest.TestCase):
             ),
         )
 
-        vol = assembler.finalize_volume("n3_mean", "sub-stroke0001")
-        self.assertIsNotNone(vol)
-        self.assertEqual(tuple(vol.prediction_volume.shape), (1, 2, 2, 3))
-        # D-axis values should follow sorted indices: 0,1,2
-        self.assertAlmostEqual(float(vol.prediction_volume[0, 0, 0, 0]), 0.0)
-        self.assertAlmostEqual(float(vol.prediction_volume[0, 0, 0, 1]), 1.0)
-        self.assertAlmostEqual(float(vol.prediction_volume[0, 0, 0, 2]), 2.0)
+        with self.assertRaisesRegex(ValueError, "deferred 2D reconstruction contract"):
+            assembler.finalize_volume("n3_mean", "sub-stroke0001")
 
-    def test_case_isolation_for_same_volume_id(self):
+    def test_each_analysis_case_rejects_reconstruction_without_geometry(self):
         assembler = VolumeAssembler()
         assembler.add_sample(
             "n1_single",
@@ -73,12 +68,10 @@ class TestVolumeAssembler(unittest.TestCase):
                 case_id="sub-stroke0002", volume_id="sub-stroke0002", slice_index=0, pred_value=5.0, gt_value=1.0
             ),
         )
-        vol_single = assembler.finalize_volume("n1_single", "sub-stroke0002")
-        vol_staple = assembler.finalize_volume("n5_soft_staple", "sub-stroke0002")
-        self.assertIsNotNone(vol_single)
-        self.assertIsNotNone(vol_staple)
-        self.assertAlmostEqual(float(vol_single.prediction_volume[0, 0, 0, 0]), 1.0)
-        self.assertAlmostEqual(float(vol_staple.prediction_volume[0, 0, 0, 0]), 5.0)
+        with self.assertRaisesRegex(ValueError, "will not manufacture an affine"):
+            assembler.finalize_volume("n1_single", "sub-stroke0002")
+        with self.assertRaisesRegex(ValueError, "will not manufacture an affine"):
+            assembler.finalize_volume("n5_soft_staple", "sub-stroke0002")
 
     def test_duplicate_slice_index_raises(self):
         assembler = VolumeAssembler()
@@ -92,7 +85,7 @@ class TestVolumeAssembler(unittest.TestCase):
         with self.assertRaises(ValueError):
             assembler.add_sample("n1_single", second)
 
-    def test_finalize_all_drains_buffers(self):
+    def test_finalize_all_rejects_2d_volume_claim(self):
         assembler = VolumeAssembler()
         assembler.add_sample(
             "n1_single",
@@ -107,10 +100,9 @@ class TestVolumeAssembler(unittest.TestCase):
             ),
         )
         self.assertEqual(assembler.buffer_size(), 2)
-        grouped = assembler.finalize_all()
-        self.assertIn("n1_single", grouped)
-        self.assertEqual(len(grouped["n1_single"]), 2)
-        self.assertEqual(assembler.buffer_size(), 0)
+        with self.assertRaisesRegex(ValueError, "geometry-aware evaluation"):
+            assembler.finalize_all()
+        self.assertEqual(assembler.buffer_size(), 2)
 
 
 if __name__ == "__main__":

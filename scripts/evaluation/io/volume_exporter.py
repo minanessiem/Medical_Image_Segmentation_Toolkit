@@ -32,45 +32,22 @@ def export_reconstructed_volumes(
             volumes = volumes[: max_volumes_per_case]
         for volume_sample in volumes:
             volume_sample.validate()
-            affine = _resolve_export_affine(volume_sample)
+            prediction_affine = np.asarray(
+                volume_sample.prediction_geometry.affine,
+                dtype=np.float64,
+            )
+            reference_affine = np.asarray(
+                volume_sample.reference_geometry.affine,
+                dtype=np.float64,
+            )
             pred_data = _to_nifti_array(volume_sample.prediction_volume)
             gt_data = _to_nifti_array(volume_sample.ground_truth_volume)
             pred_path = case_dir / f"{volume_sample.volume_id}__pred.nii.gz"
             gt_path = case_dir / f"{volume_sample.volume_id}__gt.nii.gz"
-            _write_nifti(pred_data, affine, pred_path)
-            _write_nifti(gt_data, affine, gt_path)
+            _write_nifti(pred_data, prediction_affine, pred_path)
+            _write_nifti(gt_data, reference_affine, gt_path)
             written.extend([pred_path, gt_path])
     return written
-
-
-def _resolve_export_affine(volume_sample: VolumeSample) -> np.ndarray:
-    """
-    Build export affine from first-slice metadata when available.
-    """
-    first_meta = dict(volume_sample.metadata.get("first_slice_metadata", {}))
-    raw_affine = first_meta.get("source_affine")
-    if raw_affine is None:
-        return np.eye(4, dtype=np.float64)
-    source_affine = np.asarray(raw_affine, dtype=np.float64)
-    if source_affine.shape != (4, 4):
-        return np.eye(4, dtype=np.float64)
-    pre_hw = first_meta.get("pre_resize_shape_hw")
-    if pre_hw is None:
-        pre_hw = [int(volume_sample.prediction_volume.shape[1]), int(volume_sample.prediction_volume.shape[2])]
-    out_h = int(volume_sample.prediction_volume.shape[1])
-    out_w = int(volume_sample.prediction_volume.shape[2])
-    pre_h = max(int(pre_hw[0]), 1)
-    pre_w = max(int(pre_hw[1]), 1)
-    scale_h = float(pre_h / max(out_h, 1))
-    scale_w = float(pre_w / max(out_w, 1))
-    slice_indices = volume_sample.metadata.get("slice_indices", [0])
-    min_slice_idx = int(min(slice_indices)) if slice_indices else 0
-
-    export_affine = np.array(source_affine, dtype=np.float64, copy=True)
-    export_affine[:3, 0] = source_affine[:3, 0] * scale_h
-    export_affine[:3, 1] = source_affine[:3, 1] * scale_w
-    export_affine[:3, 3] = source_affine[:3, 3] + source_affine[:3, 2] * float(min_slice_idx)
-    return export_affine
 
 
 def _to_nifti_array(volume_chwd) -> np.ndarray:

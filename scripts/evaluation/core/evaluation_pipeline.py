@@ -12,16 +12,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from scripts.evaluation.core.contracts import EvaluationThresholdProtocol, SliceSample, VolumeSample
-from scripts.evaluation.io.model_slices import iter_diffusion_case_slice_samples
+from scripts.evaluation.core.contracts import EvaluationThresholdProtocol, VolumeSample
 from scripts.evaluation.io.model_volumes import (
     iter_model_volume_samples,
     validate_model_evaluation_mode,
-)
-from scripts.evaluation.metrics.registry_2d import (
-    TWOD_METRIC_CLASSES,
-    compute_metrics_at_threshold,
-    resolve_2d_metric_class_names,
 )
 from scripts.evaluation.metrics.registry_3d import (
     THREED_METRIC_CLASSES,
@@ -52,6 +46,14 @@ from scripts.evaluation.reporting.threshold_records import (
     write_per_case_threshold_csv,
 )
 from src.data.loaders import get_dataloaders
+from src.inference.contracts import SpatialGeometry
+from src.inference.policy import InferencePolicy, resolve_inference_policy
+from src.inference.runtime import (
+    AssessmentContext,
+    InferenceRuntime,
+    parse_inference_runtime,
+    validate_runtime_compatibility,
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,9 @@ class ModelEvaluationRequest:
     loader_mode: str
     data_dim: str
     diffusion_type: str
+    inference_policy: InferencePolicy
+    inference_policy_source: str
+    inference_runtime: InferenceRuntime
 
 
 def build_model_evaluation_request(cfg: DictConfig) -> ModelEvaluationRequest:
@@ -93,14 +98,6 @@ def build_model_evaluation_request(cfg: DictConfig) -> ModelEvaluationRequest:
     model_name = str(model_name_value)
 
     levels = _resolve_levels(cfg)
-    use_ema = bool(OmegaConf.select(cfg, "evaluation.checkpoint.use_ema", default=False))
-    checkpoint_path = find_checkpoint(
-        run_dir=run_dir,
-        model_name=model_name,
-        use_ema=use_ema,
-    )
-    output_dir = resolve_evaluation_output_dir(cfg)
-    device = _resolve_device(cfg)
     threshold_protocol = build_evaluation_threshold_protocol(cfg)
     data_dim = _normalize_dim_token(OmegaConf.select(cfg, "data_mode.dim", default=None))
     _validate_analysis_level_request(
@@ -109,6 +106,33 @@ def build_model_evaluation_request(cfg: DictConfig) -> ModelEvaluationRequest:
         primary_level=str(threshold_protocol.primary.level),
     )
     validate_model_evaluation_mode(cfg)
+    resolved_inference = resolve_inference_policy(cfg)
+    runtime = parse_inference_runtime(
+        OmegaConf.select(cfg, "inference_runtime", default={})
+    )
+    validate_runtime_compatibility(
+        inference=resolved_inference.policy,
+        runtime=runtime,
+        assessment=AssessmentContext(
+            requires_ground_truth=True,
+            threshold_sweep=threshold_protocol.mode != "fixed",
+        ),
+    )
+    if resolved_inference.policy.output_space == "native_input":
+        raise ValueError(
+            "Repository-model evaluation cannot yet return native_input probabilities. "
+            "Cut 7 must restore the floating probability map and select the original-grid "
+            "label before native-space metrics are certified."
+        )
+
+    use_ema = bool(OmegaConf.select(cfg, "evaluation.checkpoint.use_ema", default=False))
+    checkpoint_path = find_checkpoint(
+        run_dir=run_dir,
+        model_name=model_name,
+        use_ema=use_ema,
+    )
+    output_dir = resolve_evaluation_output_dir(cfg)
+    device = _resolve_device(cfg)
 
     return ModelEvaluationRequest(
         run_dir=run_dir,
@@ -122,6 +146,9 @@ def build_model_evaluation_request(cfg: DictConfig) -> ModelEvaluationRequest:
         loader_mode=str(OmegaConf.select(cfg, "data_mode.loader_mode", default="") or ""),
         data_dim=data_dim,
         diffusion_type=resolve_diffusion_type(cfg),
+        inference_policy=resolved_inference.policy,
+        inference_policy_source=resolved_inference.source,
+        inference_runtime=runtime,
     )
 
 
@@ -137,29 +164,18 @@ def run_model_evaluation(cfg: DictConfig) -> Dict[str, Any]:
         checkpoint_path=request.checkpoint_path,
         device=request.device,
     )
-    dataloaders = get_dataloaders(cfg)
+    dataloaders = get_dataloaders(cfg, load_labels=True)
     if "val" not in dataloaders:
-        raise ValueError("get_dataloaders(cfg) did not return a 'val' dataloader.")
-
-    if request.data_dim == "3d" and "volume" in request.levels:
-        evaluation_result = evaluate_model_volumes(
-            model=model,
-            dataloader=dataloaders["val"],
-            cfg=cfg,
-            request=request,
-        )
-    elif request.data_dim == "2d" and "slice" in request.levels:
-        evaluation_result = evaluate_model_slices(
-            model=model,
-            dataloader=dataloaders["val"],
-            cfg=cfg,
-            request=request,
-        )
-    else:
         raise ValueError(
-            f"Unsupported evaluation request: data_dim={request.data_dim}, "
-            f"levels={list(request.levels)}."
+            "get_dataloaders(cfg, load_labels=True) did not return a 'val' dataloader."
         )
+
+    evaluation_result = evaluate_model_volumes(
+        model=model,
+        dataloader=dataloaders["val"],
+        cfg=cfg,
+        request=request,
+    )
 
     return _write_model_evaluation_artifacts(
         cfg=cfg,
@@ -178,6 +194,7 @@ def evaluate_model_volumes(
     Evaluate live model volume predictions across configured thresholds.
     """
     records: List[ThresholdMetricRecord] = []
+    spatial_samples: List[Dict[str, object]] = []
     metric_names = _resolve_volume_metric_names(cfg)
     sample_count = 0
 
@@ -189,6 +206,7 @@ def evaluate_model_volumes(
         show_progress=bool(OmegaConf.select(cfg, "evaluation.show_progress", default=True)),
     ):
         sample_count += 1
+        spatial_samples.append(_spatial_sample_record(sample))
         sample_records = _evaluate_volume_sample(
             sample=sample,
             thresholds=request.threshold_protocol.thresholds,
@@ -224,98 +242,8 @@ def evaluate_model_volumes(
         "oracle_summary": oracle_summary,
         "sample_count": int(sample_count),
         "metric_names": list(metric_names),
+        "spatial_samples": spatial_samples,
     }
-
-
-def evaluate_model_slices(
-    model: Any,
-    dataloader: Iterable[Any],
-    cfg: DictConfig,
-    request: ModelEvaluationRequest,
-) -> Dict[str, Any]:
-    """
-    Evaluate live model slice predictions across configured thresholds.
-    """
-    _enable_metadata_return(dataloader)
-    records: List[ThresholdMetricRecord] = []
-    metric_names = _resolve_slice_metric_names(cfg)
-    sample_count = 0
-    analysis_cases = [{"key": "single_case", "method": "single", "num_samples": 1}]
-
-    for case_key, sample in iter_diffusion_case_slice_samples(
-        model=model,
-        dataloader=dataloader,
-        device=request.device,
-        analysis_cases=analysis_cases,
-        max_requested_size=1,
-        show_progress=bool(OmegaConf.select(cfg, "evaluation.show_progress", default=True)),
-    ):
-        del case_key
-        sample_count += 1
-        records.extend(
-            _evaluate_slice_sample(
-                sample=sample,
-                thresholds=request.threshold_protocol.thresholds,
-                metric_names=metric_names,
-            )
-        )
-
-    aggregates = aggregate_threshold_records(records, selector_level="slice")
-    if not aggregates:
-        raise RuntimeError("Slice evaluation produced no threshold records.")
-
-    global_selection = None
-    if request.threshold_protocol.mode in {"sweep", "sweep_with_oracle"}:
-        global_selection = select_global_threshold(
-            records=records,
-            selector=request.threshold_protocol.primary,
-        )
-
-    oracle_rows: Optional[List[Dict[str, object]]] = None
-    oracle_summary: Optional[Dict[str, object]] = None
-    if request.threshold_protocol.mode in {"oracle_per_case", "sweep_with_oracle"}:
-        oracle_rows, oracle_summary = select_oracle_thresholds(
-            records=records,
-            selector=request.threshold_protocol.primary,
-        )
-
-    return {
-        "records": records,
-        "aggregates": aggregates,
-        "selector_level": "slice",
-        "global_selection": global_selection,
-        "oracle_rows": oracle_rows,
-        "oracle_summary": oracle_summary,
-        "sample_count": int(sample_count),
-        "metric_names": list(metric_names),
-    }
-
-
-def _evaluate_slice_sample(
-    sample: SliceSample,
-    thresholds: Sequence[float],
-    metric_names: Sequence[str],
-) -> List[ThresholdMetricRecord]:
-    sample.validate()
-    pred = _resolve_slice_prediction(sample)
-    records: List[ThresholdMetricRecord] = []
-    for threshold in thresholds:
-        metrics = compute_metrics_at_threshold(
-            pred=pred,
-            gt=sample.ground_truth_mask,
-            threshold=float(threshold),
-            metric_names=metric_names,
-        )
-        records.append(
-            ThresholdMetricRecord(
-                level="slice",
-                case_id=_slice_record_id(sample),
-                threshold=float(threshold),
-                metrics=metrics,
-                metadata=_slice_record_metadata(sample),
-            )
-        )
-    return records
 
 
 def _evaluate_volume_sample(
@@ -324,7 +252,8 @@ def _evaluate_volume_sample(
     metric_names: Sequence[str],
 ) -> List[ThresholdMetricRecord]:
     sample.validate()
-    metric_configs = _build_spacing_metric_configs(sample.metadata)
+    metric_configs = _build_spacing_metric_configs(sample.reference_geometry)
+    spatial_metadata = _spatial_sample_record(sample)
     records: List[ThresholdMetricRecord] = []
     for threshold in thresholds:
         metrics = compute_metrics_3d_at_threshold(
@@ -342,46 +271,14 @@ def _evaluate_volume_sample(
                 threshold=float(threshold),
                 metrics=metrics,
                 metadata={
-                    "volume_id": str(sample.volume_id),
                     **dict(sample.metadata),
+                    **spatial_metadata,
                 },
             )
         )
     return records
 
 
-def _resolve_slice_prediction(sample: SliceSample) -> torch.Tensor:
-    if sample.prediction_prob is not None:
-        return sample.prediction_prob
-    if sample.prediction_mask is not None:
-        return sample.prediction_mask
-    raise ValueError("SliceSample has neither prediction_prob nor prediction_mask.")
-
-
-def _slice_record_id(sample: SliceSample) -> str:
-    slice_id = str(sample.slice_id).strip()
-    if slice_id:
-        return slice_id
-    return str(sample.case_id)
-
-
-def _slice_record_metadata(sample: SliceSample) -> Dict[str, object]:
-    metadata = {
-        "case_id": str(sample.case_id),
-        "slice_id": str(sample.slice_id),
-        **dict(sample.metadata),
-    }
-    if sample.volume_id is not None:
-        metadata["volume_id"] = str(sample.volume_id)
-    if sample.slice_index is not None:
-        metadata["slice_index"] = int(sample.slice_index)
-    return metadata
-
-
-def _enable_metadata_return(dataloader: Iterable[Any]) -> None:
-    dataset = getattr(dataloader, "dataset", None)
-    if dataset is not None and hasattr(dataset, "return_metadata"):
-        dataset.return_metadata = True
 
 
 def _write_model_evaluation_artifacts(
@@ -393,6 +290,11 @@ def _write_model_evaluation_artifacts(
     aggregates = dict(evaluation_result["aggregates"])
     oracle_rows = evaluation_result.get("oracle_rows")
     selector_level = str(evaluation_result.get("selector_level", "volume"))
+    if selector_level != "volume":
+        raise ValueError(
+            "The geometry-aware repository-model evaluator writes volume-level "
+            f"artifacts only, got selector_level={selector_level!r}."
+        )
 
     payload = build_model_evaluation_payload(
         request=request,
@@ -427,8 +329,7 @@ def _write_model_evaluation_artifacts(
     paths = {
         "json_path": str(json_path),
         "summary_path": str(summary_path),
-        "slice_csv_path": str(aggregate_csv_path) if selector_level == "slice" else None,
-        "volume_csv_path": str(aggregate_csv_path) if selector_level == "volume" else None,
+        "volume_csv_path": str(aggregate_csv_path),
         "per_case_csv_path": str(per_case_csv_path),
         "oracle_csv_path": str(oracle_csv_path) if oracle_csv_path is not None else None,
         "config_path": str(config_path) if config_path is not None else None,
@@ -465,24 +366,39 @@ def build_model_evaluation_payload(
     global_selection = evaluation_result.get("global_selection")
     oracle_summary = evaluation_result.get("oracle_summary")
     selector_level = str(evaluation_result.get("selector_level", "volume"))
-    sample_count_key = "total_slices" if selector_level == "slice" else "total_volumes"
-    metric_level_key = "slice_level" if selector_level == "slice" else "volume_level"
+    if selector_level != "volume":
+        raise ValueError(
+            "Repository-model evaluation payloads require selector_level='volume'."
+        )
     payload = {
         "metadata": {
             "entrypoint": "evaluate_model",
+            "producer": "repository_model_live",
             "run_dir": str(request.run_dir),
             "model_name": request.model_name,
             "checkpoint_path": str(request.checkpoint_path),
             "output_dir": str(request.output_dir),
             "device": request.device,
             "use_ema": bool(request.use_ema),
+            "runtime_profile": request.inference_runtime.profile,
+            "inference_policy_source": request.inference_policy_source,
+            "output_space": request.inference_policy.output_space,
+            "precision": request.inference_policy.precision,
+            "sliding_window": {
+                "enabled": request.inference_policy.sliding_window.enabled,
+                "roi_size": list(request.inference_policy.sliding_window.roi_size),
+                "sw_batch_size": request.inference_policy.sliding_window.sw_batch_size,
+                "overlap": request.inference_policy.sliding_window.overlap,
+                "blend_mode": request.inference_policy.sliding_window.blend_mode,
+                "padding_mode": request.inference_policy.sliding_window.padding_mode,
+            },
         },
         "data_summary": {
             "levels": list(request.levels),
             "data_dim": request.data_dim,
             "loader_mode": request.loader_mode,
             "diffusion_type": request.diffusion_type,
-            sample_count_key: int(evaluation_result.get("sample_count", 0)),
+            "total_volumes": int(evaluation_result.get("sample_count", 0)),
         },
         "protocol": {
             "mode": request.threshold_protocol.mode,
@@ -491,7 +407,7 @@ def build_model_evaluation_payload(
             "primary_selector": _selector_to_dict(request.threshold_protocol.primary),
         },
         "metrics": {
-            metric_level_key: {
+            "volume_level": {
                 "metric_names": list(evaluation_result.get("metric_names", [])),
                 "threshold_results": threshold_rows,
             }
@@ -501,6 +417,12 @@ def build_model_evaluation_payload(
             "best_global_threshold": global_selection,
             "oracle_per_case": oracle_summary,
             "primary_selector": _selector_to_dict(request.threshold_protocol.primary),
+        },
+        "spatial_contract": {
+            "producer": "repository_model_live",
+            "prediction_space": request.inference_policy.output_space,
+            "reference_space": request.inference_policy.output_space,
+            "samples": list(evaluation_result.get("spatial_samples", [])),
         },
     }
     return payload
@@ -514,11 +436,6 @@ def build_model_evaluation_summary(payload: Mapping[str, Any]) -> str:
     data_summary = payload["data_summary"]
     protocol = payload["protocol"]
     analysis = payload["threshold_analysis"]
-    count_lines: List[str] = []
-    if "total_slices" in data_summary:
-        count_lines.append(f"  Slices:     {data_summary['total_slices']}")
-    if "total_volumes" in data_summary:
-        count_lines.append(f"  Volumes:    {data_summary['total_volumes']}")
     lines = [
         "Repository Model Evaluation Summary",
         "=" * 50,
@@ -526,11 +443,14 @@ def build_model_evaluation_summary(payload: Mapping[str, Any]) -> str:
         f"Model:       {metadata['model_name']}",
         f"Checkpoint:  {metadata['checkpoint_path']}",
         f"Output dir:  {metadata['output_dir']}",
+        f"Runtime:     {metadata['runtime_profile']}",
+        f"Policy:      {metadata['inference_policy_source']}",
+        f"Space:       {metadata['output_space']}",
         "",
         "Data:",
         f"  Dim:        {data_summary['data_dim']}",
         f"  Loader:     {data_summary['loader_mode']}",
-        *count_lines,
+        f"  Volumes:    {data_summary['total_volumes']}",
         "",
         "Protocol:",
         f"  Mode:              {protocol['mode']}",
@@ -643,13 +563,11 @@ def _validate_analysis_level_request(
         )
 
     if data_dim == "2d":
-        if list(levels) != ["slice"]:
-            raise ValueError(
-                "2D live-model evaluation currently supports slice-level analysis only. "
-                "Set evaluation.levels=[slice] and "
-                "evaluation.threshold_protocol.primary.level=slice."
-            )
-        return
+        raise ValueError(
+            "Geometry-aware repository-model evaluation supports 3D volume inputs only. "
+            "The deferred 2D reconstruction contract must define parent-volume geometry, "
+            "slice placement, and invertible preprocessing before 2D assessment."
+        )
 
     if data_dim == "3d":
         if list(levels) != ["volume"]:
@@ -700,28 +618,6 @@ def _resolve_volume_metric_names(cfg: DictConfig) -> Sequence[str]:
     return tuple(THREED_METRIC_CLASSES.keys())
 
 
-def _resolve_slice_metric_names(cfg: DictConfig) -> Sequence[str]:
-    configured = OmegaConf.select(cfg, "evaluation.metrics_2d.names", default=None)
-    if configured is not None:
-        metric_names = [str(name) for name in list(configured)]
-        if not metric_names:
-            raise ValueError("evaluation.metrics_2d.names must not be empty when provided.")
-        unknown = [name for name in metric_names if name not in TWOD_METRIC_CLASSES]
-        if unknown:
-            raise ValueError(
-                "evaluation.metrics_2d.names must use 2D metric class names, "
-                f"not validation aliases. Unknown class-name keys: {unknown}. "
-                f"Available class names: {sorted(TWOD_METRIC_CLASSES)}"
-            )
-        return tuple(metric_names)
-
-    validation_metric_names = _resolve_validation_2d_metric_aliases(cfg)
-    if validation_metric_names is not None:
-        return resolve_2d_metric_class_names(validation_metric_names)
-
-    return tuple(TWOD_METRIC_CLASSES.keys())
-
-
 def _resolve_validation_3d_metric_aliases(cfg: DictConfig) -> Optional[Sequence[str]]:
     metric_configs = OmegaConf.select(cfg, "validation.metrics", default=None)
     if metric_configs is None:
@@ -746,44 +642,10 @@ def _resolve_validation_3d_metric_aliases(cfg: DictConfig) -> Optional[Sequence[
     return None
 
 
-def _resolve_validation_2d_metric_aliases(cfg: DictConfig) -> Optional[Sequence[str]]:
-    metric_configs = OmegaConf.select(cfg, "validation.metrics", default=None)
-    if metric_configs is not None:
-        for metric_config in metric_configs:
-            name = str(metric_config.get("name", "")).strip()
-            if name != "SliceWiseMetricsAggregator":
-                continue
-            enabled_metrics = metric_config.get("params", {}).get("enabled_metrics", None)
-            if enabled_metrics is not None:
-                if isinstance(enabled_metrics, str):
-                    metric_names = [enabled_metrics]
-                else:
-                    metric_names = [str(metric_name) for metric_name in list(enabled_metrics)]
-                if not metric_names:
-                    raise ValueError(
-                        "validation.metrics SliceWiseMetricsAggregator "
-                        "params.enabled_metrics must not be empty when provided."
-                    )
-                return metric_names
-            break
-
-    progress_metrics = OmegaConf.select(cfg, "validation.progress_metrics", default=None)
-    if progress_metrics is None:
-        return None
-    if isinstance(progress_metrics, str):
-        metric_names = [progress_metrics]
-    else:
-        metric_names = [str(metric_name) for metric_name in list(progress_metrics)]
-    return metric_names or None
-
-
-def _build_spacing_metric_configs(metadata: Mapping[str, object]) -> Dict[str, Dict[str, object]]:
-    spacing = metadata.get("source_spacing_xyz")
-    if spacing is None:
-        spacing_xyz = (1.0, 1.0, 1.0)
-    else:
-        spacing_values = tuple(float(value) for value in list(spacing)[:3])
-        spacing_xyz = spacing_values if len(spacing_values) == 3 else (1.0, 1.0, 1.0)
+def _build_spacing_metric_configs(
+    reference_geometry: SpatialGeometry,
+) -> Dict[str, Dict[str, object]]:
+    spacing_xyz = tuple(float(value) for value in reference_geometry.spacing)
     voxel_size = float(spacing_xyz[0] * spacing_xyz[1] * spacing_xyz[2])
     return {
         "AbsoluteVolumeDifferenceNative": {"voxel_size": voxel_size},
@@ -791,6 +653,26 @@ def _build_spacing_metric_configs(metadata: Mapping[str, object]) -> Dict[str, D
         "SurfaceDiceMonai": {"spacing": spacing_xyz, "tolerance_mm": 1.0},
         "PredictedVolumeMm3": {"spacing": spacing_xyz},
         "GroundTruthVolumeMm3": {"spacing": spacing_xyz},
+    }
+
+
+def _spatial_sample_record(sample: VolumeSample) -> Dict[str, object]:
+    return {
+        "case_id": str(sample.case_id),
+        "volume_id": str(sample.volume_id),
+        "prediction_space": sample.prediction_space,
+        "reference_space": sample.reference_space,
+        "prediction_geometry": _spatial_geometry_to_dict(sample.prediction_geometry),
+        "reference_geometry": _spatial_geometry_to_dict(sample.reference_geometry),
+    }
+
+
+def _spatial_geometry_to_dict(geometry: SpatialGeometry) -> Dict[str, object]:
+    return {
+        "shape": list(geometry.shape),
+        "affine": [list(row) for row in geometry.affine],
+        "spacing": list(geometry.spacing),
+        "orientation": geometry.orientation,
     }
 
 

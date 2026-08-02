@@ -1,5 +1,9 @@
 # @package _global_
 
+defaults:
+  - default
+  - _self_
+
 evaluation:
   threshold_protocol:
     mode: fixed

@@ -8,6 +8,7 @@ import torch
 from monai.data import MetaTensor
 from torch.utils.data import Subset
 
+from scripts.evaluation.core.evaluation_pipeline import _evaluate_volume_sample
 from scripts.nnunet.core.exporters import VolumeExportStrategy
 from scripts.nnunet.core.io_adapters import iter_nnunet_volume_samples
 
@@ -189,6 +190,19 @@ class TestNnunetVolumeProducerSpatialContract(unittest.TestCase):
             self.assertEqual(sample.reference_space, "model_preprocessed")
             self.assertEqual(sample.prediction_geometry.spacing, (1.0, 2.0, 3.0))
             self.assertEqual(sample.metadata["source"], "nnunet_volumes")
+
+            records = _evaluate_volume_sample(
+                sample=sample,
+                thresholds=[0.5],
+                metric_names=["DiceNativeCoefficient"],
+            )
+
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].metadata["source"], "nnunet_volumes")
+            self.assertEqual(
+                records[0].metadata["prediction_space"],
+                "model_preprocessed",
+            )
 
     def test_equal_shape_different_affine_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
