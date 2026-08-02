@@ -1,0 +1,22 @@
+# @package _global_
+#
+# ISLES26 local 3D T1-raw conversion that preserves each source case grid.
+# Spatial preprocessing is disabled; T1_RAW intensity handling is unchanged.
+# Canonical usage:
+#   python3 -m scripts.nnunet.convert_to_nnunet \
+#       --config-name=nnunet/convert/isles26_local_3d_t1raw_native
+
+defaults:
+  - /nnunet/convert: local
+  - /environment: isles26_local
+  - /data_profile: isles26_3d_fullvol_t1raw_native
+  - _self_
+
+dataset:
+  active_subsets:
+    train: train
+    val: val_full
+    sample: val_full
+
+nnunet:
+  export_space: native_input

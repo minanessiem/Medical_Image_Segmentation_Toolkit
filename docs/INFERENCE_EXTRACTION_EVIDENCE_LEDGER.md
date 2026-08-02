@@ -103,6 +103,159 @@ while leaving out-of-contract values in circulation is not an accepted
 resolution. Until this work is completed, E011's synthetic FP16 test is only
 contract coverage and `native_fp16` remains uncertified.
 
+### O005: Geometry-aware 2D slice evaluation is deferred and must fail early
+
+The current 2D evaluation path cannot make the spatial claims required by the
+new geometry-aware evaluation contract. `SliceSample` carries tensors, case
+and slice identifiers, and an untyped metadata mapping, but it does not require
+prediction/reference spaces, parent-volume geometries, an invertible slice
+trace, or verified physical placement within a 3D grid. `VolumeAssembler`
+orders slices by integer index and stacks them into `[C,H,W,D]`; it does not
+prove a common parent affine, spacing, orientation, slice axis, physical slice
+position, or prediction/reference geometry.
+
+The current producers also retain inconsistent and insufficient information:
+
+- the online ISLES24 2D loader resizes native planes to the model image size
+  without returning a geometry/transform record suitable for reconstruction;
+- the online ISLES26 2D loader returns identity/path metadata but not the
+  original and model-space geometries or an invertible record of its
+  full-volume preprocessing and in-plane resize;
+- the precomputed nnU-Net 2D loader records source metadata, but its returned
+  tensor may be resized without a corresponding verified output-grid affine;
+- the nnU-Net 2D converter writes each resized plane as an independent
+  `[H,W,1]` NIfTI and derives a per-slice affine by scaling source in-plane
+  vectors and offsetting along one presumed slice direction. Its JSONL record
+  is useful provenance, but the conversion does not establish a typed,
+  invertible mapping for reassembling all predictions into either the exact
+  source parent grid or the full model-preprocessed parent grid;
+- the nnU-Net 2D conversion naming convention turns every slice into an
+  independent nnU-Net case. Neither nnU-Net prediction output nor the current
+  adapter proves that all returned slices are complete, consistently ordered,
+  drawn from one parent geometry, or still associated with the correct centre
+  plane for context-slice inputs;
+- the nnU-Net slice-file adapter can identify a slice and read a NIfTI affine,
+  but does not currently verify prediction/reference affines or establish a
+  common parent-volume geometry for the assembled stack;
+- context-slice inputs still predict the centre plane, but that centre-plane
+  placement is not represented as a spatial contract.
+
+Consequently, equal 2D shapes or a common `volume_id` do not establish that
+slice predictions and references occupy the same physical plane, nor that a
+stacked result occupies the native or model-preprocessed 3D grid. Allowing
+volume metrics, physical-volume metrics, surface distances, exports, or
+native-space claims from these samples would risk spatially plausible but
+scientifically unsupported results.
+
+The project decision is therefore:
+
+- 2D slice geometry compliance is a separate follow-up task outside the
+  current inference-extraction PRD;
+- the geometry-aware evaluation path introduced by the current work supports
+  3D volumes only;
+- a request with `data_mode.dim=2d`, or a `SliceSample`/assembled volume that
+  reaches the new geometry-aware path without the future typed spatial
+  contract, must fail before prediction assessment or volume assembly with an
+  actionable error naming the missing 2D geometry/reconstruction support;
+- `VolumeAssembler` must not manufacture a parent affine, assume that
+  first-slice metadata describes the stack, or treat index order as physical
+  geometry;
+- no compatibility default may label unidentified 2D slices as
+  `model_preprocessed` or `native_input` merely to keep an old path running;
+- existing standalone 2D code is not certified by this CAP and must not be
+  presented as compliant with the new result/reference-space contract;
+- existing nnU-Net 2D conversion may remain available for legacy standalone
+  workflows, but its converted datasets and predictions must fail early when
+  submitted to the new geometry-aware evaluator.
+
+The active 3D scope is narrower and explicit. Live repository-model volumes
+may be evaluated in `model_preprocessed` space now and in `native_input` space
+after Cut 7 restoration. Full-volume nnU-Net prediction/reference pairs may be
+evaluated only when their originating conversion preset explicitly declares
+their common space as `model_preprocessed` or `native_input`, as recorded in
+O006; their complete NIfTI geometries must agree independently of that
+declaration.
+
+A future 2D compliance task must cover repository slice loaders, precomputed
+slice loaders, nnU-Net 2D conversion, nnU-Net prediction adapters, and volume
+assembly together. It should define a typed slice spatial contract that
+retains, at minimum, original and model parent-volume geometries, slice axis,
+centre-slice index, ordering, pre/post-resize plane shapes, and an invertible
+in-plane/full-volume transform trace. It must then update each 2D producer,
+verify prediction/reference plane geometry, reconstruct floating-point
+probabilities before thresholding, and test axis permutations, reverse order,
+anisotropic spacing, oblique affines, missing/duplicate slices, context-slice
+placement, and world-coordinate preservation. Only after those acceptance
+tests pass may 2D slice inputs enter geometry-aware volume evaluation.
+
+### O006: 3D nnU-Net space is conversion-owned and export geometry must be truthful
+
+A NIfTI affine describes the physical grid encoded by a file, but it does not
+establish whether this project should classify that grid as the untouched
+`native_input` grid or as a `model_preprocessed` grid. The repository's nnU-Net
+conversion pipeline can export volumes after applying MedSegDiff preprocessing.
+A conversion may resample or reorient a source case before writing the
+nnU-Net-compatible NIfTI. Conversely, another conversion may preserve the raw
+input grid. File extension, filename, array shape, affine validity, or nnU-Net
+ownership cannot distinguish these semantic cases reliably.
+
+The earlier proposal made space classification a separate user-supplied
+evaluation value. Repository inspection established a better source of truth:
+`evaluate_nnunet_results.py` already composes the exact nnU-Net conversion
+preset with the evaluation preset. The complete 3D conversion preset therefore
+owns required `nnunet.export_space`, using the same fixed vocabulary as shared
+inference: `model_preprocessed` or `native_input`. It has no inferred or
+compatibility default, and the evaluator consumes rather than redeclares it.
+
+Current presets divide into two groups that the precursor must assign
+explicitly:
+
+- `isles24_cluster_3d_baseline` and `isles24_local_3d_baseline` receive
+  `native_input`, because their base config disables orientation and spacing
+  transformations and disables full-volume padding;
+- `isles26_cluster_3d_t1raw`, `isles26_local_3d_t1raw`, and
+  `isles26_atlas30_cluster_3d_t1raw` receive `model_preprocessed`, because the
+  inherited ISLES26 preprocessing reorients to RAS and resamples to 1 mm
+  isotropic spacing;
+- `isles26_local_3d_t1raw_native` receives `native_input`: it retains T1-raw
+  intensity handling but disables orientation and spacing, explicitly allows
+  native spacing, retains the no-padding full-volume policy, and uses a
+  distinct nnU-Net dataset identity. `T1_RAW` alone does not imply native
+  spatial geometry.
+
+The inspection also exposed an exporter defect. `VolumeExportStrategy` obtains
+the image and label tensors after repository preprocessing but currently loads
+the raw source image and assigns its affine to the exported arrays. For the
+ISLES26 presets, that can write a reoriented/resampled array with an
+untransformed affine. The resulting file is loadable but its physical geometry
+is untrustworthy. Cut-5-nnunet-precursor must instead obtain export geometry
+from the transformed MONAI image/label grid, cross-check aligned image and
+label geometry, and write that verified affine/qform/sform. Raw source geometry
+remains separate provenance.
+
+The configured semantic declaration must be checked against actual output. A
+`native_input` export must match the selected raw reference shape and physical
+geometry. A `model_preprocessed` export must match the transformed tensor grid.
+The existing `dataset.json` source context and `export_provenance.jsonl` should
+record `export_space` plus distinct source/export geometry; no additional hash
+or artifact-provenance subsystem is required.
+
+This declaration does not replace evaluation-time geometry validation. The
+3D nnU-Net producer must still read prediction and reference NIfTI geometry
+independently and reject shape, affine, spacing, or orientation mismatches
+before metrics. Geometry agreement proves that the pair occupies the same
+encoded grid; `nnunet.export_space` states what that grid means within this
+repository's result-space contract. The selected space and verified geometry
+must enter the shared `VolumeSample` contract and reports so model-space and
+native-space analyses cannot be accidentally combined.
+
+All nnU-Net config, conversion, affine-writing, 3D producer, and 2D early-error
+work belongs to Cut-5-nnunet-precursor. The finalized Cut 5 consumes the
+compliant 3D producer and changes only the common evaluator package. Previously
+generated spatially transformed nnU-Net datasets are not certified merely by
+adding the config key; they require inspection and should be regenerated if
+their arrays were written with stale source affines.
+
 ---
 
 ## Evidence item E001: Legacy four-case GPU baseline
@@ -916,6 +1069,125 @@ tests an accumulation/output-domain policy. Changes to a source-manifest file,
 the checkpoint/config, preprocessing dependencies, precision behavior, MONAI
 sliding-window behavior, or the selected policy invalidate the corresponding
 claims and require rerunning this evidence.
+
+---
+
+## Evidence item E013: Cut-5 nnU-Net precursor spatial export
+
+### Status and question
+
+| Field | Value |
+|---|---|
+| Evidence ID | `E013` |
+| Status | `ACCEPTED` for bounded Desktop conversion and spatial-contract evidence |
+| Base commit | `1f8c8c4ad6813dd198ea7c8789fd866be9f8240e` plus the uncommitted Cut-5 precursor diff |
+
+E013 asks whether the updated 3D nnU-Net converter preserves a declared native
+grid, writes a genuinely transformed grid with its transformed affine, records
+source/export geometry separately, and produces geometry-complete 3D nnU-Net
+evaluation samples.
+
+### Execution environment and command scope
+
+Tests ran in the isolated Desktop WSL worktree
+`cut5_nnunet_precursor_20260801a` using Python 3.10.12 from
+`MedSegDiff_env`. Focused spatial/config tests reported 23 passes after the
+native ISLES26 preset extension. Existing
+nnU-Net conversion and directly affected evaluation regressions reported 36
+passes; a broader nnU-Net and evaluation-consumer run reported 16 and 34
+passes respectively. These groups overlap and must not be summed as a unique
+test count.
+
+Real conversion used the ordinary Hydra entrypoint with:
+
+```text
+nnunet.test=true
+nnunet.test_max_slices=1
+nnunet.parallel.enabled=false
+```
+
+This exported one training and one validation/test case for both the local
+ISLES24 3D baseline and local ISLES26 3D T1-raw presets. It did not convert a
+complete dataset. A header-only scan then selected one additional ISLES26 case
+whose source grid was not already 1 mm and passed only that case through the
+same dataset transform and `VolumeExportStrategy` path.
+
+The native ISLES26 extension used
+`nnunet/convert/isles26_local_3d_t1raw_native` with `nnunet.test=true`,
+`nnunet.test_max_slices=10`, both export splits enabled, and parallel export
+disabled. Thus the converter wrote 10 training and 10 validation/test cases,
+not a complete dataset.
+
+The transformed ATLAS30 extension used the existing
+`nnunet/convert/isles26_atlas30_cluster_3d_t1raw` preset with only the desktop
+environment/runtime, isolated output path, 10-case test limit, and sequential
+export overridden. It likewise wrote 10 training and 10 `val_full` cases,
+not a complete dataset. Because those bounded cases were already RAS/1 mm, a
+second probe disabled the local loader smoke cap, scanned the same configured
+train/`val_full` subsets by NIfTI header, and exported one source that actually
+required resampling through the same configured loader and
+`VolumeExportStrategy`.
+
+### Result and acceptance scope
+
+- The ISLES24 native export preserved its source shape, affine, spacing, and
+  LAS orientation, and recorded `native_input`.
+- The initially selected ISLES26 smoke cases were already RAS/1 mm. They prove
+  loader, `Subset`, writer, and provenance integration but not a grid change.
+- The targeted real ISLES26 case changed from spacing `(1.1, 1.0, 1.0)` and
+  shape `(160, 196, 200)` to RAS/1 mm and shape `(176, 196, 200)`.
+  Source/export affines differed as expected.
+- Reopened image and label NIfTIs matched the recorded transformed shape and
+  affine; qform and sform were both set and agreed with that export affine.
+- Synthetic fixtures additionally cover nontrivial transformed affine,
+  false-native rejection, image/label affine disagreement, wrapped-dataset
+  source lookup, and equal-shape prediction/reference affine mismatch.
+- The local `isles26_local_3d_t1raw_native` preset inherited T1-raw intensity
+  handling through the dedicated dataset/data-profile layers, disabled
+  orientation and spacing, allowed native spacing, retained no full-volume
+  padding, and used the distinct nnU-Net identity
+  `Dataset264_isles26_t1_raw_native`.
+- A bounded run exported 10 training and 10 validation/test cases. All 20
+  records and reopened image/label NIfTIs preserved their source shape,
+  affine, spacing, and orientation; qform/sform were set, labels were binary
+  `uint8`, and provenance declared `native_input`.
+- Because those first 20 cases were already RAS/1 mm, a targeted additional
+  native-preset probe selected a real source with spacing `(1.1, 1.0, 1.0)`
+  and shape `(160, 196, 200)`. The exported image and label retained that exact
+  spacing, shape, orientation, and affine, demonstrating that the native
+  preset does not resample a non-unit grid.
+- Ten geometry-identical prediction fixtures entered the real 3D nnU-Net
+  evaluator through the composed native conversion preset. It matched 10/10
+  pairs, processed 10 volumes and 1,915 derived slices, and recorded
+  `volume_space=native_input`. Exact-reference volume Dice and surface Dice
+  were 1.0; HD95 and absolute volume differences were 0.
+- The named ATLAS30 transformed preset resolved to dataset 265, `val_full`, RAS
+  orientation, 1 mm isotropic spacing, and `model_preprocessed` export space
+  while the desktop environment override changed only filesystem/runtime
+  concerns.
+- All 20 bounded ATLAS30 records and reopened image/label NIfTIs agreed with
+  their recorded export shape, affine, spacing, and RAS orientation; qform and
+  sform were set, labels were binary `uint8`, and provenance declared
+  `model_preprocessed`. The first 20 source grids were already RAS/1 mm, so
+  they exercise the transformed preset without independently proving a grid
+  change.
+- The targeted ATLAS30 probe found a source with spacing
+  `(1.100000023841858, 1.0, 1.0)` and shape `(160, 196, 200)`. The configured
+  preprocessing exported RAS/1 mm image and label volumes with shape
+  `(176, 196, 200)` and a changed affine. Reopened qform/sform and both export
+  grids agreed with the transformed affine.
+- Ten geometry-identical ATLAS30 prediction fixtures entered the real 3D
+  nnU-Net evaluator through the named transformed conversion preset. It
+  matched 10/10 pairs, processed 10 volumes and 1,850 derived slices, and
+  recorded `volume_space=model_preprocessed`. Exact-reference volume Dice and
+  Surface Dice were 1.0; all reported HD95 variants and absolute volume
+  differences were 0.
+
+E013 does not certify previously generated nnU-Net datasets, a complete
+dataset conversion, nnU-Net planning/training/prediction, 2D reconstruction,
+or the finalized Cut 5 evaluator. Changes to conversion transforms, exporter
+geometry handling, spatial contracts, MONAI/nibabel versions, or the six 3D
+conversion presets require this evidence to be rerun.
 
 ---
 

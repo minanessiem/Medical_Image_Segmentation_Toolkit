@@ -1,0 +1,14 @@
+defaults:
+  - isles26_modalities_t1raw
+
+nnunet:
+  dataset_id: "264"
+  dataset_name: "isles26_t1_raw_native"
+
+preprocessing_configs:
+  common:
+    orientation:
+      enabled: false
+    spacing:
+      enabled: false
+      allow_native_spacing: true

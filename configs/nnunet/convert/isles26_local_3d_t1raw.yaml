@@ -16,3 +16,6 @@ dataset:
     train: train
     val: val_full
     sample: val_full
+
+nnunet:
+  export_space: model_preprocessed

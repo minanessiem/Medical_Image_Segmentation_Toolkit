@@ -9,9 +9,10 @@ This module provides:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Tuple
+from typing import Dict, Iterator, Tuple
 
 import nibabel as nib
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -20,6 +21,7 @@ from scripts.evaluation.io.nnunet import (
     count_matched_pairs as count_nnunet_slice_pairs,
     iter_nnunet_slice_samples,
 )
+from src.inference.contracts import SUPPORTED_OUTPUT_SPACES, SpatialGeometry
 
 
 SUPPORTED_INPUT_FORMATS = ("slices_2d", "volumes_3d")
@@ -49,11 +51,17 @@ def count_nnunet_volume_pairs(pred_dir: Path, gt_dir: Path) -> Tuple[int, int, i
 def iter_nnunet_volume_samples(
     pred_dir: Path,
     gt_dir: Path,
+    volume_space: str,
     strict_shape: bool = True,
 ) -> Iterator[VolumeSample]:
     """
-    Yield native nnU-Net volume prediction/ground-truth pairs as VolumeSample.
+    Yield geometry-verified nnU-Net volume pairs as ``VolumeSample``.
     """
+    if volume_space not in SUPPORTED_OUTPUT_SPACES:
+        raise ValueError(
+            "nnU-Net 3D volume_space must be one of "
+            f"{sorted(SUPPORTED_OUTPUT_SPACES)}, got {volume_space!r}."
+        )
     pred_dir = Path(pred_dir)
     gt_dir = Path(gt_dir)
 
@@ -76,8 +84,8 @@ def iter_nnunet_volume_samples(
         if pred_file is None:
             continue
 
-        gt_tensor, gt_affine, gt_spacing = _load_nifti_volume_tensor_with_metadata(gt_file)
-        pred_tensor, pred_affine, _ = _load_nifti_volume_tensor_with_metadata(pred_file)
+        gt_tensor, gt_geometry = _load_nifti_volume_tensor_with_metadata(gt_file)
+        pred_tensor, pred_geometry = _load_nifti_volume_tensor_with_metadata(pred_file)
 
         if gt_tensor.shape != pred_tensor.shape:
             if strict_shape:
@@ -85,6 +93,29 @@ def iter_nnunet_volume_samples(
                     f"Shape mismatch for {case_key}: pred={pred_tensor.shape}, gt={gt_tensor.shape}"
                 )
             continue
+
+        if not np.allclose(
+            np.asarray(pred_geometry.affine),
+            np.asarray(gt_geometry.affine),
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        ):
+            raise ValueError(
+                f"Affine mismatch for {case_key}: prediction and reference do not "
+                "occupy the same physical grid."
+            )
+        if not np.allclose(
+            pred_geometry.spacing,
+            gt_geometry.spacing,
+            rtol=1.0e-5,
+            atol=1.0e-5,
+        ):
+            raise ValueError(f"Spacing mismatch for {case_key}.")
+        if pred_geometry.orientation != gt_geometry.orientation:
+            raise ValueError(
+                f"Orientation mismatch for {case_key}: "
+                f"pred={pred_geometry.orientation}, gt={gt_geometry.orientation}."
+            )
 
         # nnUNetv2_predict writes hard labels by default. Keep native values
         # (typically 0/1 for binary lesion tasks) and let metrics apply policy.
@@ -96,14 +127,19 @@ def iter_nnunet_volume_samples(
             volume_id=case_key,
             prediction_volume=pred_volume,
             ground_truth_volume=gt_volume,
+            prediction_space=volume_space,
+            reference_space=volume_space,
+            prediction_geometry=pred_geometry,
+            reference_geometry=gt_geometry,
             metadata={
-                "source": "nnunet_native_volumes",
+                "source": "nnunet_volumes",
                 "pred_path": str(pred_file),
                 "gt_path": str(gt_file),
                 "case_key": case_key,
-                "source_affine": gt_affine.tolist(),
-                "pred_affine": pred_affine.tolist(),
-                "source_spacing_xyz": list(gt_spacing) if gt_spacing is not None else None,
+                "volume_space": volume_space,
+                "source_affine": [list(row) for row in gt_geometry.affine],
+                "pred_affine": [list(row) for row in pred_geometry.affine],
+                "source_spacing_xyz": list(gt_geometry.spacing),
                 "num_slices": int(gt_volume.shape[-1]),
             },
         )
@@ -111,14 +147,19 @@ def iter_nnunet_volume_samples(
         yield sample
 
 
-def _load_nifti_volume_tensor_with_metadata(path: Path) -> Tuple[Tensor, Tensor, Optional[Tuple[float, float, float]]]:
+def _load_nifti_volume_tensor_with_metadata(path: Path) -> Tuple[Tensor, SpatialGeometry]:
     nii = nib.load(path)
     data = nii.get_fdata()
     tensor = torch.from_numpy(data).float()
     volume_tensor = _to_channel_first_volume(tensor=tensor, path=path)
-    affine = torch.from_numpy(nii.affine).float()
-    spacing = _extract_spacing_xyz(nii)
-    return volume_tensor, affine, spacing
+    affine = np.asarray(nii.affine, dtype=np.float64)
+    geometry = SpatialGeometry(
+        shape=tuple(int(value) for value in volume_tensor.shape[-3:]),
+        affine=tuple(tuple(float(value) for value in row) for row in affine),
+        spacing=tuple(float(value) for value in nib.affines.voxel_sizes(affine)),
+        orientation="".join(str(code) for code in nib.aff2axcodes(affine)),
+    )
+    return volume_tensor, geometry
 
 
 def _to_channel_first_volume(tensor: Tensor, path: Path) -> Tensor:
@@ -140,13 +181,6 @@ def _to_channel_first_volume(tensor: Tensor, path: Path) -> Tensor:
         f"Unsupported NIfTI volume shape for {path}: {tuple(tensor.shape)}. "
         "Expected [H,W,D], [H,W,D,1], or [1,H,W,D]."
     )
-
-
-def _extract_spacing_xyz(nii: nib.Nifti1Image) -> Optional[Tuple[float, float, float]]:
-    zooms = tuple(float(v) for v in nii.header.get_zooms())
-    if len(zooms) < 3:
-        return None
-    return (zooms[0], zooms[1], zooms[2])
 
 
 def _basename_no_nii(path: Path) -> str:

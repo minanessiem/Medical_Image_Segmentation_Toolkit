@@ -16,3 +16,6 @@ dataset:
     train: train
     val: val
     sample: val
+
+nnunet:
+  export_space: native_input

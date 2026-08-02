@@ -15,6 +15,8 @@ import nibabel as nib
 import numpy as np
 from tqdm import tqdm
 
+from src.inference.contracts import SUPPORTED_OUTPUT_SPACES
+
 
 def clear_directory(directory: Path, description: str = "") -> int:
     """
@@ -321,6 +323,14 @@ class VolumeExportStrategy:
     sample_unit_name = "cases"
     mode_key = "volumes_3d"
 
+    def __init__(self, export_space: str):
+        if export_space not in SUPPORTED_OUTPUT_SPACES:
+            raise ValueError(
+                "VolumeExportStrategy export_space must be one of "
+                f"{sorted(SUPPORTED_OUTPUT_SPACES)}, got {export_space!r}."
+            )
+        self.export_space = export_space
+
     @staticmethod
     def _to_numpy(data: Any) -> np.ndarray:
         if hasattr(data, "detach"):
@@ -344,18 +354,36 @@ class VolumeExportStrategy:
         return ""
 
     def _resolve_source_path(self, dataset: Any, idx: int) -> str:
-        database = getattr(dataset, "database", None)
-        if not isinstance(database, list) or idx < 0 or idx >= len(database):
+        current = dataset
+        resolved_idx = int(idx)
+        visited = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            indices = getattr(current, "indices", None)
+            nested = getattr(current, "dataset", None)
+            if indices is None or nested is None:
+                break
+            if resolved_idx < 0 or resolved_idx >= len(indices):
+                return ""
+            resolved_idx = int(indices[resolved_idx])
+            current = nested
+
+        database = getattr(current, "database", None)
+        if (
+            not isinstance(database, list)
+            or resolved_idx < 0
+            or resolved_idx >= len(database)
+        ):
             return ""
 
-        record = database[idx]
+        record = database[resolved_idx]
         if not isinstance(record, dict):
             return ""
 
         candidate_keys: List[str] = []
-        for key in getattr(dataset, "base_modalities", []) or []:
+        for key in getattr(current, "base_modalities", []) or []:
             candidate_keys.append(str(key))
-        for modality in getattr(dataset, "modalities", []) or []:
+        for modality in getattr(current, "modalities", []) or []:
             candidate_keys.append(str(modality).split("_")[0])
 
         # Keep original order while deduplicating.
@@ -384,34 +412,57 @@ class VolumeExportStrategy:
     @staticmethod
     def _resolve_metadata_from_source(
         source_path: str,
-        fallback_shape: List[int],
     ) -> Dict[str, Any]:
-        if source_path and Path(source_path).exists():
-            try:
-                source_img = nib.load(source_path)
-                affine = np.asarray(source_img.affine, dtype=np.float64)
-                spacing = [float(value) for value in source_img.header.get_zooms()[:3]]
-                axcodes = [str(code) for code in nib.aff2axcodes(affine)]
-                volume_shape = [int(dim) for dim in source_img.shape[:3]]
-                return {
-                    "source_path": source_path,
-                    "source_affine": affine.tolist(),
-                    "source_spacing_xyz": spacing,
-                    "source_axcodes": axcodes,
-                    "source_volume_shape": volume_shape,
-                    "export_affine": affine.tolist(),
-                }
-            except Exception:
-                pass
-
-        identity = np.eye(4, dtype=np.float64)
+        if not source_path or not Path(source_path).exists():
+            raise ValueError(
+                "3D nnUNet export requires a readable source image path so source "
+                "and export geometry can be distinguished."
+            )
+        try:
+            source_img = nib.load(source_path)
+        except Exception as exc:
+            raise ValueError(
+                f"Could not read source NIfTI geometry from {source_path}: {exc}"
+            ) from exc
+        affine = np.asarray(source_img.affine, dtype=np.float64)
         return {
             "source_path": source_path,
-            "source_affine": identity.tolist(),
-            "source_spacing_xyz": [1.0, 1.0, 1.0],
-            "source_axcodes": ["R", "A", "S"],
-            "source_volume_shape": fallback_shape,
-            "export_affine": identity.tolist(),
+            "source_affine": affine.tolist(),
+            "source_spacing_xyz": [
+                float(value) for value in nib.affines.voxel_sizes(affine)
+            ],
+            "source_axcodes": [str(code) for code in nib.aff2axcodes(affine)],
+            "source_volume_shape": [int(dim) for dim in source_img.shape[:3]],
+        }
+
+    @staticmethod
+    def _extract_transformed_affine(
+        value: Any, *, field_name: str
+    ) -> Optional[np.ndarray]:
+        affine_value = getattr(value, "affine", None)
+        if affine_value is None:
+            return None
+        if hasattr(affine_value, "detach"):
+            affine_value = affine_value.detach()
+        if hasattr(affine_value, "cpu"):
+            affine_value = affine_value.cpu()
+        affine = np.asarray(affine_value, dtype=np.float64)
+        if affine.shape != (4, 4) or not np.isfinite(affine).all():
+            raise ValueError(
+                f"{field_name} transformed affine must be a finite 4x4 matrix, "
+                f"got shape {tuple(affine.shape)}."
+            )
+        return affine
+
+    @staticmethod
+    def _geometry_from_affine(affine: np.ndarray, shape: List[int]) -> Dict[str, Any]:
+        return {
+            "export_affine": affine.tolist(),
+            "export_spacing_xyz": [
+                float(value) for value in nib.affines.voxel_sizes(affine)
+            ],
+            "export_axcodes": [str(code) for code in nib.aff2axcodes(affine)],
+            "export_volume_shape": [int(value) for value in shape],
         }
 
     @staticmethod
@@ -439,6 +490,21 @@ class VolumeExportStrategy:
         image, label, case_id = sample[0], sample[1], sample[2]
         safe_case_id = str(case_id)
 
+        image_affine = self._extract_transformed_affine(image, field_name="image")
+        label_affine = self._extract_transformed_affine(label, field_name="label")
+        if label_affine is None:
+            raise ValueError(
+                "3D nnUNet export requires transformed label MetaTensor geometry; "
+                f"case '{safe_case_id}' returned a label without an affine."
+            )
+        if image_affine is not None and not np.allclose(
+            image_affine, label_affine, rtol=1.0e-5, atol=1.0e-5
+        ):
+            raise ValueError(
+                "Transformed image/label affine mismatch for 3D nnUNet export "
+                f"case '{safe_case_id}'."
+            )
+
         image_np = self._to_numpy(image)
         if image_np.ndim != 4:
             raise ValueError(
@@ -460,10 +526,30 @@ class VolumeExportStrategy:
                 f"{tuple(label_np.shape)} for case '{safe_case_id}'."
             )
 
+        if tuple(image_np.shape[-3:]) != tuple(label_np.shape):
+            raise ValueError(
+                "Transformed image/label spatial shape mismatch for 3D nnUNet export "
+                f"case '{safe_case_id}': image={tuple(image_np.shape[-3:])}, "
+                f"label={tuple(label_np.shape)}."
+            )
+
         fallback_shape = [int(dim) for dim in image_np.shape[-3:]]
         source_path = self._resolve_source_path(dataset, idx)
-        metadata = self._resolve_metadata_from_source(source_path, fallback_shape=fallback_shape)
-        export_affine = np.asarray(metadata["export_affine"], dtype=np.float64)
+        metadata = self._resolve_metadata_from_source(source_path)
+        export_affine = label_affine
+        export_geometry = self._geometry_from_affine(export_affine, fallback_shape)
+
+        if self.export_space == "native_input":
+            source_affine = np.asarray(metadata["source_affine"], dtype=np.float64)
+            source_shape = tuple(int(value) for value in metadata["source_volume_shape"])
+            if source_shape != tuple(fallback_shape) or not np.allclose(
+                source_affine, export_affine, rtol=1.0e-5, atol=1.0e-5
+            ):
+                raise ValueError(
+                    "nnunet.export_space='native_input' is inconsistent with the "
+                    f"actual exported grid for case '{safe_case_id}': "
+                    f"source_shape={source_shape}, export_shape={tuple(fallback_shape)}."
+                )
 
         image_files: List[str] = []
         for ch_idx in range(num_channels):
@@ -487,7 +573,8 @@ class VolumeExportStrategy:
             "source_spacing_xyz": metadata["source_spacing_xyz"],
             "source_axcodes": metadata["source_axcodes"],
             "source_volume_shape": metadata["source_volume_shape"],
-            "export_affine": metadata["export_affine"],
+            "export_space": self.export_space,
+            **export_geometry,
             "post_export_shape_hwd": fallback_shape,
         }
 

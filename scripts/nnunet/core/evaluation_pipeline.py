@@ -34,6 +34,7 @@ from scripts.nnunet.core.io_adapters import (
     iter_nnunet_slice_samples,
     iter_nnunet_volume_samples,
 )
+from src.inference.contracts import SUPPORTED_OUTPUT_SPACES
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ class NnunetEvaluationRequest:
     gt_dir: Path
     output_dir: Path
     input_format: str
+    volume_space: str
     levels: Sequence[str]
     threshold: float
     allow_shape_mismatch: bool
@@ -115,6 +117,27 @@ def build_evaluation_request(cfg: DictConfig) -> NnunetEvaluationRequest:
             "nnunet_eval.input_format must be one of "
             f"{SUPPORTED_INPUT_FORMATS}. Got '{input_format}'."
         )
+    if input_format == "slices_2d":
+        raise ValueError(
+            "Geometry-aware nnU-Net evaluation currently supports 3D volumes only. "
+            "The slices_2d path lacks a certified parent-volume geometry, "
+            "in-plane resize inversion, slice-placement trace, and reconstruction "
+            "contract. Use input_format='volumes_3d' or complete the deferred 2D "
+            "geometry-compliance work before evaluation."
+        )
+
+    volume_space_value = OmegaConf.select(cfg, "nnunet.export_space", default=None)
+    if not _is_set(volume_space_value):
+        raise ValueError(
+            "3D nnU-Net evaluation requires nnunet.export_space from the composed "
+            "conversion preset; it is not inferred or redeclared by evaluation."
+        )
+    volume_space = str(volume_space_value).strip()
+    if volume_space not in SUPPORTED_OUTPUT_SPACES:
+        raise ValueError(
+            "nnunet.export_space must be one of "
+            f"{sorted(SUPPORTED_OUTPUT_SPACES)}, got {volume_space!r}."
+        )
 
     raw_levels = OmegaConf.select(cfg, "nnunet_eval.levels", default=None)
     if raw_levels is None:
@@ -151,6 +174,7 @@ def build_evaluation_request(cfg: DictConfig) -> NnunetEvaluationRequest:
         gt_dir=gt_dir,
         output_dir=output_dir,
         input_format=input_format,
+        volume_space=volume_space,
         levels=levels,
         threshold=threshold,
         allow_shape_mismatch=allow_shape_mismatch,
@@ -170,6 +194,7 @@ def run_nnunet_evaluation(
     _log("Resolved evaluation request from composed config.")
     _log(
         f"input_format={request.input_format}, levels={list(request.levels)}, "
+        f"volume_space={request.volume_space}, "
         f"threshold={request.threshold}, allow_shape_mismatch={request.allow_shape_mismatch}, "
         f"foreground_only_all_metrics={request.foreground_only_all_metrics}"
     )
@@ -223,6 +248,7 @@ def run_nnunet_evaluation(
             compute_slice_metrics=include_slice_level,
             foreground_only_all_metrics=request.foreground_only_all_metrics,
             expected_pairs=matched,
+            volume_space=request.volume_space,
         )
     else:
         raise ValueError(
@@ -246,6 +272,7 @@ def run_nnunet_evaluation(
             "matched_pairs": int(matched),
             "missing_predictions": int(missing),
             "input_format": request.input_format,
+            "volume_space": request.volume_space,
             "levels": list(request.levels),
             "foreground_only_all_metrics": bool(request.foreground_only_all_metrics),
             "convert_config_name": convert_config_name,
@@ -273,6 +300,7 @@ def run_nnunet_evaluation(
 
     return {
         "input_format": request.input_format,
+        "volume_space": request.volume_space,
         "levels": list(request.levels),
         "pred_dir": str(request.pred_dir),
         "gt_dir": str(request.gt_dir),
@@ -334,8 +362,9 @@ def _evaluate_volumes_3d(
     compute_slice_metrics: bool,
     foreground_only_all_metrics: bool,
     expected_pairs: int,
+    volume_space: str,
 ) -> Tuple[Dict[float, Dict[str, Any]], Dict[float, Dict[str, Any]]]:
-    _log("Starting native 3D volume evaluation...")
+    _log(f"Starting 3D volume evaluation in {volume_space} space...")
     metric_names = tuple(THREED_METRIC_CLASSES.keys())
     state = VolumeThresholdState(
         threshold=threshold,
@@ -363,6 +392,7 @@ def _evaluate_volumes_3d(
         for volume_sample in iter_nnunet_volume_samples(
             pred_dir=pred_dir,
             gt_dir=gt_dir,
+            volume_space=volume_space,
             strict_shape=not allow_shape_mismatch,
         ):
             pbar.set_postfix_str(str(volume_sample.volume_id), refresh=False)
@@ -380,7 +410,8 @@ def _evaluate_volumes_3d(
                         prediction_mask=pred[..., slice_index],
                         ground_truth_mask=gt[..., slice_index],
                         metadata={
-                            "source": "nnunet_native_volumes",
+                            "source": "nnunet_volumes",
+                            "volume_space": volume_space,
                             "derived_from_volume": True,
                         },
                     )
@@ -420,7 +451,7 @@ def _evaluate_volumes_3d(
         pbar.close()
         if slice_pbar is not None:
             slice_pbar.close()
-    _log(f"Native 3D volume evaluation complete: processed={processed_volumes}.")
+    _log(f"3D volume evaluation complete: processed={processed_volumes}.")
 
     volume_results: Dict[float, Dict[str, Any]] = {threshold: state.to_dict()}
     if slice_engine is not None:

@@ -2,7 +2,7 @@
 
 **Document version:** 1.3
 **Original date:** 2026-07-29
-**Last revised:** 2026-07-31
+**Last revised:** 2026-08-02
 **Status:** Draft for implementation
 **Primary competition:** ISLES26 3D lesion segmentation
 **Primary model scope:** Existing 3D discriminative MONAI DynUNet checkpoints
@@ -136,6 +136,19 @@ A user-supplied, competition-specific manifest entry that maps an arbitrary Gran
 
 An independently implementable CAP unit. Every cut below includes its own context, dependencies, affected files, required changes, tests, and acceptance criteria so it can be assigned to an agent with minimal additional conversation history.
 
+### 3.13 nnU-Net export space
+
+The semantic space represented by the NIfTI files produced by one complete
+3D nnU-Net conversion preset. It is declared as
+`nnunet.export_space` using the same fixed vocabulary as shared inference:
+`model_preprocessed` or `native_input`. It describes the grid written by the
+converter; it does not select or alter preprocessing.
+
+NIfTI format, file naming, or nnU-Net ownership does not establish this
+semantic classification. The conversion preset owns the declaration, the
+converter verifies it against the geometry it actually writes, and the
+nnU-Net volume evaluator consumes it from the composed conversion config.
+
 ---
 
 ## 4. Confirmed requirements and external release gates
@@ -164,6 +177,16 @@ An independently implementable CAP unit. Every cut below includes its own contex
 - Native blind inference and GC inference use `load_labels=False`; training, native validation, and repository-model evaluation retain `load_labels=True` unless explicitly performing blind inference.
 - Native geometry is captured independently for every case before preprocessing and before raw modality metadata is removed during channel merging. Different cases may have different shapes, spacings, orientations, and affines.
 - Modalities within one case are expected to satisfy the dataset's alignment contract. This CAP does not add a new pre-preprocessing cross-modality alignment validator.
+- Every supported 3D nnU-Net conversion preset explicitly declares
+  `nnunet.export_space`; no dataset-name, file-format, or evaluation-time
+  fallback may infer it.
+- A 3D nnU-Net converter writes the affine/spacing/orientation of the tensor it
+  actually exports. A transformed tensor must never be written with its
+  untransformed source affine.
+- Geometry-aware evaluation in the current CAP accepts 3D volumes only. Both
+  repository 2D slice producers and nnU-Net 2D conversion/evaluation require a
+  separate reconstruction contract and fail early at the new spatially aware
+  boundary.
 
 ### 4.2 Current Grand Challenge platform requirements
 
@@ -349,7 +372,18 @@ The existing soft-STAPLE code reduces over only the final two axes. It is theref
 ### 7.7 Existing ancillary packages
 
 - `scripts/test_validation_memory.py` directly samples models. It should later delegate to the shared predictor or be superseded by the release resource benchmark.
-- `scripts/nnunet/` remains a separate external model/runtime pipeline. Its affine and round-trip tests provide useful testing patterns but it should not be forced through `src/inference`.
+- `scripts/nnunet/` remains a separate external model/runtime pipeline and is
+  not forced through `src/inference`. Its 3D converter currently exports
+  tensors produced by repository dataloaders but reconstructs `export_affine`
+  from the raw source image. That is valid for a grid-preserving export but is
+  incorrect when the loader has reoriented or resampled the tensor. The
+  Cut-5 nnU-Net precursor corrects this and makes export space explicit before
+  the common evaluator consumes nnU-Net volumes.
+- The current nnU-Net 2D converter emits individually resized slice NIfTIs and
+  per-slice provenance, but neither that representation nor the downstream
+  slice adapter proves a complete invertible parent-volume geometry. It remains
+  outside the geometry-aware 3D evaluation scope alongside repository 2D
+  slice producers.
 - `scripts/reporting/` consumes result artifacts and requires no inference dependency.
 - `scripts/dataset_setup/` creates/explores dataset definitions and requires no inference dependency.
 - generic `scripts/slurm/` remains training-oriented. The new builder may reuse its environment facts and command-construction lessons without coupling core inference to SLURM.
@@ -419,6 +453,7 @@ slug -> raw dataset key     |                       |
 | Case batch, workers, timeout, device and allowed capabilities | `inference_runtime` profile | Location/mode constraints must not duplicate scientific policy |
 | Probability prediction mechanics | `src/inference/` | Shared scientific behavior |
 | Pairing result and reference-label space | Evaluation/training consumers with shared contracts | Metrics are valid only when grids match |
+| Semantic space and written geometry of a 3D nnU-Net dataset | Complete nnU-Net conversion preset plus converter | `nnunet.export_space` declares meaning; the exporter must write and verify the transformed/native grid it actually produced |
 | `/input`, `/output`, `inputs.json`, socket slugs, slug-to-canonical-key bindings, HTTP statuses | GC adapter and interface manifest | Platform transport only; shared preprocessing sees canonical dataset keys, never slugs |
 | Docker base, system libraries, Python packages, non-root user | GC builder/container | Runtime infrastructure only |
 | SLURM submission | Existing or new runner wrapper | Cluster orchestration only |
@@ -869,6 +904,32 @@ runtime capability profile
 
 This permits native validation and container diagnostics in either valid result space without allowing evaluation-only behavior to leak into the submission endpoint.
 
+### 9.9 nnU-Net conversion and evaluation ownership
+
+The complete 3D conversion preset owns `nnunet.export_space`. The precursor
+updates current presets to declare it at their leaf so environment-local and
+cluster conversion commands remain independently auditable. The field is required for
+`full_volumes_3d`/`3d` conversion and accepts only `model_preprocessed` or
+`native_input`; it has no inferred default.
+
+The converter owns proof that the files it writes agree with that declaration.
+It records raw source geometry separately from exported geometry and writes the
+affine carried by the transformed image/label grid. For a `native_input`
+declaration, exported and selected native-reference geometry must agree. For a
+`model_preprocessed` declaration, exported geometry must agree with the
+transformed tensor. Image channels and label must occupy the same export grid.
+
+The nnU-Net evaluator does not redeclare or guess this value. Its existing
+composition of conversion and evaluation configs carries `nnunet.export_space`
+into the 3D volume producer. That producer still reads prediction and reference
+NIfTI geometry independently and rejects shape, affine, spacing, or orientation
+disagreement before metrics. The declaration supplies semantic meaning;
+geometry agreement supplies physical-grid evidence.
+
+This is deliberately narrow provenance: reuse the existing `dataset.json` source
+context and `export_provenance.jsonl`. Cut 5 does not add conversion hashes or a
+second nnU-Net provenance subsystem.
+
 ---
 
 ## 10. Required changes to existing components
@@ -892,6 +953,9 @@ This permits native validation and container diagnostics in either valid result 
 | `scripts/evaluation/core/model_loader.py` | Delegate common model construction/loading to `src/models/` | Preserve evaluation checkpoint CLI behavior and run-directory discovery while removing duplicated model lifecycle behavior |
 | `scripts/evaluation/io/model_volumes.py` | Direct shared predictor/config consumer | In Cut 4, migrate model-space probability generation directly; in Cut 5, retain volume identity/metadata and complete explicit result/reference-space and evaluation provenance integration |
 | `scripts/evaluation/core/evaluation_pipeline.py` | Assessment consumer | Continue metrics, threshold protocols, reports, and provenance; validate prediction/reference geometry |
+| `configs/nnunet/convert/*3d*.yaml` | Explicit 3D export-space source of truth | Declare `nnunet.export_space` as `native_input` or `model_preprocessed`; do not infer it in evaluation |
+| `scripts/nnunet/core/conversion_core.py` and `exporters.py` | Produce spatially truthful 3D nnU-Net datasets | Validate the declared export space, write transformed tensor geometry rather than a stale source affine, and extend existing dataset/provenance records |
+| `scripts/nnunet/core/io_adapters.py` and evaluation orchestration | Compliant external-model 3D producer | Consume conversion-owned space, validate prediction/reference NIfTI geometry, and emit the finalized volume-space contract before Cut 5 |
 | `scripts/analysis/threshold_analysis.py` | Legacy migration/deprecation | Do not extend independently; later delegate or retire after parity |
 | `scripts/test_validation_memory.py` | Replace or delegate | Convert to shared predictor resource smoke test or supersede with GC benchmark |
 | `tests/test_evaluation_*` and loader/validation tests | Regression safety | Update mocks/import paths only where needed; preserve behavior assertions |
@@ -931,6 +995,15 @@ Every implementation cut must preserve these invariants where applicable:
 23. **Per-case geometry:** native metadata is captured for every case before preprocessing/channel merging; no dataset-wide geometry is assumed.
 24. **Within-case alignment contract:** raw modalities within a case are expected aligned. This CAP does not introduce an additional pre-preprocessing alignment check.
 25. **Transport isolation:** interface manifests map arbitrary socket slugs to canonical dataset keys; core inference and preprocessing never depend on competition slug names.
+26. **Truthful nnU-Net export geometry:** every 3D nnU-Net conversion declares
+    its export space and writes the affine, spacing, orientation, and shape of
+    the tensor grid actually emitted.
+27. **No semantic space guessing:** nnU-Net evaluation consumes
+    `nnunet.export_space` from its conversion config and still validates both
+    NIfTI geometries independently.
+28. **3D-only geometry-aware evaluation:** repository and nnU-Net 2D slice
+    paths fail before geometry-aware assessment until their parent-volume and
+    reconstruction contracts are implemented and tested.
 
 ---
 
@@ -1321,22 +1394,202 @@ If parity cannot be established, atomically restore the old inference-specific `
 
 ---
 
-## 17. Cut 5: Migrate offline repository-model evaluation
+## 16A. Cut-5-nnunet-precursor: Space-aware 3D nnU-Net conversion
 
 ### Context
 
-Offline evaluation is the scientific certification surface for deployment behavior. Cut 4 has already routed live-model, model-space probability generation in `model_volumes.py` directly through the shared predictor. Cut 5 completes the evaluation integration around that accepted path: shared config composition, result/reference-space ownership, labels, metrics, threshold protocols, provenance, and reports. It must retain the current command-line interface and make model-space parity evaluation and native-space deployment certification explicit rather than conflating them.
+The external nnU-Net runtime remains separate from `src.inference`, but its 3D
+datasets and predictions are consumers of the same scientific evaluation
+contract. Current 3D conversion loads tensors through repository preprocessing,
+then `VolumeExportStrategy` reconstructs `export_affine` from the untransformed
+source image. This is correct only for a grid-preserving conversion. ISLES26
+conversion enables RAS orientation and 1 mm isotropic spacing, so writing its
+transformed tensor with the source affine can create a spatially plausible but
+physically false NIfTI.
+
+NIfTI format also cannot tell the evaluator whether a grid is semantically
+`native_input` or `model_preprocessed`. That fact is known when the conversion
+preset is selected and must travel with the converted dataset. This precursor
+makes every supported 3D nnU-Net producer comply before Cut 5 changes the
+shared evaluator. Cut 5 must not return to `scripts/nnunet/` to repair producer
+contracts.
+
+The current repository contains both kinds of 3D conversion. The ISLES24 local
+and cluster baseline presets disable orientation, spacing, and full-volume
+padding and are assigned `native_input` by this cut. The ordinary ISLES26
+local, cluster, and ATLAS30 T1-raw presets enable RAS orientation and 1 mm
+isotropic spacing and are assigned `model_preprocessed`. A separate local
+ISLES26 T1-raw native baseline disables orientation and spacing, opts into
+native spacing explicitly, retains the existing no-padding full-volume policy,
+and is assigned `native_input`. `T1_RAW` describes modality/intensity handling;
+it does not by itself establish native spatial geometry.
 
 ### Dependencies
 
-Cuts 0-4. Model-space evaluation integration can complete immediately. Native-space evaluation assertions depend on the Cut 7 restoration contract and may be finalized when that parallel cut lands.
+Cuts 0-4, including the Cut 3 `SpatialGeometry` contract and per-case metadata
+work. This cut is a mandatory dependency of Cut 5.
+
+### Affected files and components
+
+- `configs/nnunet/convert/isles24_cluster_3d_baseline.yaml`
+- `configs/nnunet/convert/isles24_local_3d_baseline.yaml`
+- `configs/nnunet/convert/isles26_cluster_3d_t1raw.yaml`
+- `configs/nnunet/convert/isles26_local_3d_t1raw.yaml`
+- `configs/nnunet/convert/isles26_local_3d_t1raw_native.yaml`
+- `configs/nnunet/convert/isles26_atlas30_cluster_3d_t1raw.yaml`
+- `configs/dataset/isles26_modalities_t1raw_native.yaml`
+- `configs/data_profile/isles26_3d_fullvol_t1raw_native.yaml`
+- `scripts/nnunet/core/conversion_core.py`
+- `scripts/nnunet/core/exporters.py`
+- `scripts/nnunet/core/io_adapters.py`
+- `scripts/nnunet/core/evaluation_pipeline.py`
+- `scripts/nnunet/evaluate_nnunet_results.py`
+- `scripts/evaluation/core/contracts.py`, only for the forward spatial seam
+  consumed by both nnU-Net and Cut 5
+- nnU-Net conversion/evaluation documentation
+- existing converter affine, round-trip, config, and volume-adapter tests
+- new focused 3D conversion-space and volume-geometry tests
+
+### Desired changes
+
+1. Add required `nnunet.export_space` to each complete 3D conversion preset.
+   Use only `model_preprocessed` and `native_input`; do not infer a default from
+   dataset identity, preprocessing flags, NIfTI format, or nnU-Net ownership.
+2. Set both ISLES24 3D baseline presets to `native_input`. Set the ordinary
+   ISLES26 local/cluster T1-raw presets and the ISLES26 ATLAS30 3D preset to
+   `model_preprocessed`. Add the local ISLES26 T1-raw native baseline as
+   `native_input`, with a distinct nnU-Net dataset identity and explicit
+   orientation-disabled, spacing-disabled/allowed-native preprocessing.
+3. Require and validate `nnunet.export_space` for
+   `loader_mode=full_volumes_3d` with `dim=3d` before output directories are
+   cleared or files are written. Existing 2D conversion does not receive an
+   invented space declaration in this cut.
+4. Capture raw source geometry separately from export geometry. Obtain export
+   geometry from the transformed MONAI image/label grid, not by copying the raw
+   source affine after preprocessing.
+5. Use the jointly transformed label `MetaTensor` as an available authoritative
+   export-grid source, cross-check image metadata when retained, and validate
+   that every image channel and label has the same spatial shape and geometry.
+   Do not reconstruct a transformed affine from requested spacing/orientation
+   config values when the actual tensor metadata is available.
+6. Write image channels and labels with the verified export affine and
+   consistent qform/sform. Preserve the source affine, spacing, orientation,
+   and shape as separate provenance rather than relabeling them as output
+   geometry.
+7. For `native_input`, require exported shape and physical geometry to agree
+   with the selected raw reference grid. For `model_preprocessed`, require the
+   written shape and geometry to agree with the transformed tensor grid.
+8. Add `export_space` and actual export shape/affine/spacing/orientation to the
+   existing `dataset.json` source context and `export_provenance.jsonl`; do not
+   add hashes or a second provenance artifact.
+9. Prepare the finalized 3D `VolumeSample` seam with explicit prediction space,
+   reference space, prediction geometry, and reference geometry. These fields
+   may be temporarily optional only so this precursor remains independently
+   compatible with the not-yet-migrated repository-model producer; the nnU-Net
+   3D producer must populate all four immediately, and Cut 5 removes acceptance
+   of missing fields from canonical 3D evaluation.
+10. Resolve the common 3D nnU-Net space from the composed conversion config.
+    The nnU-Net evaluator must not ask for a duplicate evaluation-space value.
+11. Load prediction and ground-truth NIfTI geometry independently and reject
+    shape, affine, spacing, or orientation disagreement before creating a
+    compliant 3D sample. Replace metadata such as `nnunet_native_volumes` with
+    the neutral producer identity `nnunet_volumes`.
+12. Reject nnU-Net `slices_2d` at the geometry-aware evaluation boundary with
+    an actionable error explaining that parent-volume geometry, in-plane
+    resize inversion, slice placement, and reconstruction remain uncertified.
+    Existing 2D conversion may continue for legacy use, but it is not certified
+    for the new evaluator.
+13. Do not route nnU-Net model execution through `src.inference`, change nnU-Net
+    training/prediction semantics, or implement general 2D spatial compliance.
+
+### Expected tests and testing components
+
+- Compose every current 3D conversion preset and assert its exact declared
+  export space.
+- Missing or unknown `nnunet.export_space` fails for 3D before filesystem
+  mutation; no compatibility/default inference is accepted.
+- A synthetic native-grid volume preserves source shape and affine.
+- Synthetic reorientation and anisotropic-resampling fixtures write the
+  transformed shape, affine, spacing, and orientation rather than the source
+  affine.
+- Image-channel and label geometry disagreement fails.
+- A false `native_input` declaration for a changed grid fails.
+- Written NIfTIs are reopened and checked for shape, affine, spacing,
+  orientation, qform, and sform; provenance contains distinct source/export
+  geometry and `export_space`.
+- A matching 3D nnU-Net prediction/reference pair creates a spatially complete
+  `VolumeSample` for both allowed semantic spaces.
+- Equal-shaped prediction/reference files with different affines fail before
+  metrics; spacing and orientation mismatches also fail.
+- nnU-Net 2D geometry-aware evaluation fails with the documented deferred-work
+  error, while legacy 2D conversion tests remain green.
+- On the desktop, export and reopen at least one ISLES24 native-grid case and
+  one ISLES26 transformed-grid case when the data is available. Compare the
+  written geometry with the actual loader outputs, and run nnU-Net dataset
+  integrity verification where practical.
+
+### Acceptance criteria
+
+- Every supported 3D nnU-Net conversion preset declares its semantic export
+  space explicitly.
+- Every written 3D NIfTI uses the geometry of the tensor actually exported;
+  transformed ISLES26 tensors never receive stale raw-source affines.
+- A `native_input` declaration is verified against the selected raw reference
+  rather than trusted blindly.
+- Existing per-case provenance distinguishes source and export geometry and
+  records export space without a new hash/manifest subsystem.
+- The 3D nnU-Net evaluation producer supplies explicit, independently verified
+  prediction/reference space and geometry.
+- nnU-Net 2D inputs cannot enter the geometry-aware evaluation path.
+- Cut 5 requires no changes beneath `scripts/nnunet/` or `configs/nnunet/`.
+
+Previously generated spatially transformed 3D nnU-Net datasets are not
+retroactively certified by a config edit. Existing ISLES26 exports must be
+inspected and should be regenerated if they were written with raw source
+affines. This cut never deletes or overwrites external datasets automatically.
+
+### Rollback
+
+Revert the precursor as one unit and treat all nnU-Net volume inputs as
+non-compliant with the new evaluator. Do not restore evaluation-time space
+guessing and do not continue using a transformed dataset known to carry a stale
+affine.
+
+---
+
+## 17. Cut 5: Migrate geometry-aware offline evaluation
+
+### Context
+
+Offline evaluation is the scientific certification surface for deployment
+behavior. Cut 4 already routed live repository-model, model-space probability
+generation in `model_volumes.py` through the shared predictor. The nnU-Net
+precursor has separately made 3D external-model volumes declare their space and
+geometry. Cut 5 now completes the common evaluator integration: shared config
+composition, final `VolumeSample` enforcement, label/reference selection,
+metrics, threshold protocols, operational provenance, and reports.
+
+This cut changes the evaluator package, not nnU-Net conversion or nnU-Net
+producer code. It retains the current repository-model CLI and makes
+model-space parity evaluation and native-space deployment certification
+explicit rather than conflating them.
+
+### Dependencies
+
+Cuts 0-4 and Cut-5-nnunet-precursor. Model-space evaluation integration can
+complete immediately. Native-space repository-model evaluation assertions
+depend on the Cut 7 restoration contract and may be finalized when that
+parallel cut lands.
 
 ### Affected files and components
 
 - `scripts/evaluation/core/model_loader.py`
+- `scripts/evaluation/core/contracts.py`
 - `scripts/evaluation/io/model_volumes.py`
+- `scripts/evaluation/io/volume_assembler.py`
 - `scripts/evaluation/core/evaluation_pipeline.py`
 - `scripts/evaluation/evaluate_model.py`
+- `scripts/evaluation/reporting/` where spatial facts enter existing reports
 - `scripts/evaluation/README.md`
 - `configs/evaluation/*.yaml`
 - `configs/inference/*.yaml`
@@ -1344,44 +1597,112 @@ Cuts 0-4. Model-space evaluation integration can complete immediately. Native-sp
 - existing `tests/test_evaluation_model_loader.py`
 - existing `tests/test_evaluation_io_model_volumes.py`
 - existing `tests/test_evaluation_pipeline.py`
-- existing entrypoint/integration tests
+- evaluation contract, reporting, entrypoint, and integration tests
+
+Explicitly unaffected are `scripts/nnunet/`, `configs/nnunet/`, nnU-Net dataset
+generation, model architecture implementations, and Cut 7 spatial inversion.
 
 ### Desired changes
 
-1. Replace any remaining evaluation-owned model construction with `src.models` calls. Retain the direct `src.inference` probability path established in Cut 4 and remove only remaining evaluation-local prediction normalization/orchestration that duplicates it.
-2. Continue obtaining images, labels, case IDs, and evaluation metadata through existing dataloaders with explicit `load_labels=True`; use the Cut 3 extended labeled result when dual-space evaluation requires native and transformed references.
-3. Continue returning `VolumeSample` contracts to the evaluation engine.
-4. Compose the active top-level `cfg.inference` and `cfg.inference_runtime=native` instead of defining a second evaluation-specific prediction schema.
-5. Preserve fixed, sweep, oracle, and sweep-with-oracle threshold protocols under evaluation config.
-6. Preserve current report schemas unless an explicit schema version is incremented.
-7. Record shared inference API version, output space, runtime profile, policy source, and policy hash in evaluation provenance.
-8. Permit `model_preprocessed` probabilities for historical parity and `native_input` probabilities for deployment certification.
-9. Pair model-space prediction with transformed labels and native-space prediction with original-grid labels; validate shapes and geometry before metrics.
-10. Treat threshold sweeps as evaluation-only consumers of probabilities. Write the selected fixed threshold into a candidate inference policy only through an explicit export/selection step.
-11. Keep current 2D legacy evaluator behavior functional; do not force its migration into this cut.
-12. Keep the explicit current rejection of 3D non-discriminative diffusion.
+1. Replace any remaining evaluation-owned model construction with `src.models`
+   calls. Retain the direct `src.inference` probability path established in
+   Cut 4 and remove remaining evaluation-local prediction normalization or
+   interpretation that duplicates the shared probability contract. Do not
+   apply another sigmoid merely because a tensor crosses the evaluation
+   boundary.
+2. Continue obtaining images, labels, case IDs, and evaluation metadata through
+   existing dataset infrastructure with explicit `load_labels=True`; use the
+   Cut 3 labeled result when dual-space evaluation requires native and
+   transformed references.
+3. Finalize `VolumeSample` so every accepted 3D sample explicitly carries
+   `prediction_space`, `reference_space`, `prediction_geometry`, and
+   `reference_geometry`. Remove the precursor's transitional acceptance of
+   absent fields from canonical 3D evaluation.
+4. Validate before any metric computation that tensor shapes agree with their
+   declared `SpatialGeometry`, prediction/reference spaces are identical, and
+   shape, affine, spacing, and orientation agree within explicit tolerances.
+   Shape equality alone is insufficient.
+5. Compose `/inference: sliding_window_model_space` and
+   `/inference_runtime: native` from `configs/evaluation/default.yaml`. Existing
+   evaluation presets inherit this unless they explicitly select another
+   complete inference policy. Evaluation supersedes saved training-validation
+   inference settings; an explicit top-level policy is never field-merged with
+   them.
+6. Preserve `evaluation.input_source` as producer selection (`live_model` versus
+   fixed outputs), not as a runtime profile.
+7. Preserve fixed, sweep, oracle, and sweep-with-oracle threshold protocols
+   under evaluation config. Threshold sweeps consume shared probabilities;
+   exporting one selected deployment threshold remains an explicit action.
+8. Pair `model_preprocessed` probabilities with the jointly transformed label.
+   After Cut 7, pair `native_input` probabilities with the original native-grid
+   label. Never resample a reference ad hoc inside the metric engine to conceal
+   a space mismatch.
+9. Record useful operational provenance: producer type, prediction/reference
+   spaces and verified geometries, runtime profile, policy source, selected
+   checkpoint identity, threshold protocol, and selected threshold. Do not add
+   a new SHA-256/config-hash subsystem in this cut.
+10. Preserve existing report schemas where possible. If spatial fields require
+    a public schema change, make that change explicit and update its consumers
+    rather than silently altering meaning.
+11. Reject repository-model `data_mode.dim=2d`, legacy `SliceSample` assembly,
+    or any 2D sample lacking the deferred typed reconstruction contract before
+    geometry-aware assessment. `VolumeAssembler` must not manufacture a parent
+    affine or infer space from first-slice metadata.
+12. Keep the explicit current rejection of 3D non-discriminative diffusion and
+    name `ProbabilityPredictor` registration as the future inference hook.
+13. Keep shared evaluation free of DynUNet, SwinUNETR, or other architecture
+    branches; raw return/deep-supervision interpretation remains backend-owned.
 
 ### Expected tests and testing components
 
-- Existing evaluation unit/integration tests pass.
-- The selected baseline checkpoint produces probability and metric parity at threshold 0.5.
-- Threshold-sweep best-global selection remains stable within defined tie tolerance.
-- Native-space evaluation can be run against labels in original geometry where fixtures/data permit.
-- A deliberately mismatched output/reference space fails before metric computation.
-- The same inference config can run in native Python and `gc_container_test` environments when both profiles allow its requested capabilities.
-- Provenance includes the exact checkpoint, config hash, policy hash, and code version.
+- Existing relevant evaluation unit/integration tests pass after their fixtures
+  provide explicit 3D space and geometry.
+- A fully declared matching 3D sample passes; missing/unknown space, missing
+  geometry, cross-space pairing, tensor/geometry shape disagreement, and
+  equal-shape/different-affine pairing all fail before metrics.
+- Shared predictor probabilities pass through the repository-model producer
+  unchanged; no second sigmoid or probability reinterpretation occurs.
+- The selected baseline checkpoint produces model-space probability and metric
+  parity at threshold 0.5 within the predeclared environment-appropriate
+  tolerance.
+- Threshold-sweep best-global and oracle selection remain stable within the
+  defined tie tolerance.
+- Explicit top-level inference policy replaces saved training-validation
+  inference policy as a whole, and `evaluation.input_source` does not alter the
+  runtime profile.
+- A compliant sample emitted by the nnU-Net precursor enters the same metrics
+  engine without any Cut 5 change to nnU-Net code.
+- Repository and nnU-Net 2D inputs fail early with the actionable deferred
+  geometry/reconstruction message.
+- Native-space repository-model evaluation runs against original-grid labels
+  after Cut 7 where fixtures/data permit.
+- The same inference policy can run in native Python and
+  `gc_container_test` when both runtime profiles permit its capabilities.
 - Failure to load the requested checkpoint remains clear at the CLI.
 
 ### Acceptance criteria
 
-- The canonical evaluation entrypoint uses `src.inference` for 3D model prediction.
-- Evaluation remains a metrics/reporting wrapper rather than a second inference implementation.
-- Threshold recommendations intended for deployment are generated using the same probability path the container will use.
-- Evaluation-specific sweep/oracle config never becomes active inside `gc_submission`.
+- The canonical evaluation entrypoint uses `src.inference` for 3D
+  repository-model prediction.
+- Evaluation remains a geometry-validating metrics/reporting wrapper rather
+  than a second inference implementation.
+- Repository-model and compliant nnU-Net 3D samples enter one evaluation engine
+  through the finalized explicit space/geometry contract.
+- No `scripts/nnunet/` or `configs/nnunet/` file changes in Cut 5.
+- Threshold recommendations intended for deployment use the same probability
+  path as container inference; sweep/oracle config never becomes active inside
+  `gc_submission`.
+- No 2D slice path is presented as geometry-aware or assigned a guessed output
+  space.
+- Native-space certification remains explicitly incomplete until Cut 7 passes.
 
 ### Rollback
 
-Revert evaluation-specific config/result-space/provenance integration to the accepted Cut 4 model-space shared-predictor state if needed. Do not restore the removed `valid_utils.py` inferer or introduce a second model-volume prediction implementation as a Cut 5 rollback mechanism.
+Revert evaluation-specific config/result-space/provenance integration to the
+accepted Cut 4 model-space shared-predictor state, and treat both repository and
+nnU-Net inputs as not yet accepted by the new geometry-aware evaluator. Do not
+restore the removed `valid_utils.py` inferer, introduce a second model-volume
+prediction implementation, or undo the independently correct nnU-Net precursor.
 
 ---
 
@@ -1393,7 +1714,8 @@ Cut 4 has already migrated training-time probability generation directly from th
 
 ### Dependencies
 
-Cuts 0-5, with evaluation parity already green.
+Cuts 0-5, including the mandatory Cut-5-nnunet-precursor, with evaluation
+parity already green.
 
 ### Affected files and components
 
@@ -1874,7 +2196,10 @@ Cut 4  Predictor/sliding window
   |\
   | +--> Cut 7  Spatial restoration
   |
-Cut 5  Evaluation migration and dual-space validation
+Cut-5-nnunet-precursor
+       Space-aware 3D nnU-Net conversion/producer compliance
+  |
+Cut 5  Geometry-aware evaluation migration and dual-space validation
   |
 Cut 6  Training validation/config migration
   |
@@ -1889,7 +2214,12 @@ Cut 11 T4 qualification
 Cut 12 Platform/release closure
 ```
 
-Cut 7 may begin after Cut 4 and proceed alongside Cuts 5-6, but container release work must wait for its acceptance criteria. Cut 8 may be implemented incrementally; no optional enhancement blocks a correct baseline container.
+Cut-5-nnunet-precursor is mandatory before Cut 5 so Cut 5 can remain confined
+to the evaluator package. Cut 7 may begin after Cut 4 and proceed alongside the
+precursor and Cuts 5-6, but native-space repository-model evaluation and
+container release work must wait for its acceptance criteria. Cut 8 may be
+implemented incrementally; no optional enhancement blocks a correct baseline
+container.
 
 Recommended pull-request granularity is one cut per PR, except very small scaffolding cuts may be combined if their tests and rollback boundaries remain clear.
 
@@ -1918,6 +2248,10 @@ Recommended pull-request granularity is one cut per PR, except very small scaffo
 - `load_labels` behavior and independence from `test_flag`;
 - socket-slug to canonical raw-key binding validation;
 - image read/write validation.
+- required `nnunet.export_space` composition and fixed-vocabulary validation
+  for every supported 3D conversion preset;
+- nnU-Net 3D source-versus-export geometry validation and explicit early
+  rejection of uncertified 2D slice evaluation.
 
 ### 26.2 Spatial property tests
 
@@ -1930,6 +2264,12 @@ Recommended pull-request granularity is one cut per PR, except very small scaffo
 - physical-volume filtering under anisotropic spacing.
 - model-space result/reference pairing and native-space result/reference pairing;
 - rejection of cross-space metric comparisons.
+- nnU-Net native-grid export preservation and transformed-grid affine/spacing/
+  orientation correctness;
+- rejection of an nnU-Net `native_input` declaration when the exported grid
+  differs from the selected raw reference;
+- rejection of equal-shaped nnU-Net prediction/reference NIfTIs with different
+  physical geometries.
 
 ### 26.3 Repository integration tests
 
@@ -1939,6 +2279,10 @@ Recommended pull-request granularity is one cut per PR, except very small scaffo
 - absence of remaining `build_validation_inferer` imports/calls after Cut 4;
 - evaluation model loader and volume producer tests;
 - evaluation pipeline and threshold protocol tests;
+- nnU-Net 3D conversion-config, volume-export, reopened-NIfTI, and compliant
+  external-volume producer tests;
+- early-error tests for repository and nnU-Net 2D inputs at the geometry-aware
+  boundary while legacy conversion-only tests remain green;
 - training validation smoke tests;
 - old saved-run config translation tests;
 - new top-level inference config composition tests;
@@ -2134,6 +2478,33 @@ A dirty worktree does not automatically prohibit development builds, but competi
 **Risk:** A refactor blends logits and applies sigmoid after overlap aggregation even though the accepted path predicts probabilities per patch and blends those probabilities, causing unmeasured probability and metric drift.
 **Mitigation:** Characterize and preserve probability-before-blending in Cut 4 with parity/order regression tests. Treat logits-first blending only as a future explicit experimental policy with offline comparison and new release evidence.
 
+### 28.20 Transformed nnU-Net tensor is written with a stale source affine
+
+**Risk:** The 3D converter applies MONAI orientation or spacing transforms to an
+image/label tensor but writes the resulting array with the raw input affine.
+The file remains readable and may have plausible dimensions while representing
+incorrect physical coordinates.
+
+**Mitigation:** Cut-5-nnunet-precursor reads export geometry from the transformed
+tensor grid, cross-checks image and label geometry, writes consistent
+qform/sform, reopens spatial fixtures, and retains raw source geometry only as
+separate provenance. Existing transformed exports remain uncertified until
+inspected or regenerated.
+
+### 28.21 2D slices are assembled into an unsupported 3D spatial claim
+
+**Risk:** Repository or nnU-Net slice paths resize and export individual planes,
+then `VolumeAssembler` stacks them by integer index without a verified
+parent-volume affine, slice-plane placement, or invertible resize/preprocessing
+trace. The resulting array could be mislabeled `native_input` or
+`model_preprocessed` and used for invalid volume/surface metrics.
+
+**Mitigation:** The geometry-aware evaluator supports 3D volume producers only
+and rejects both repository and nnU-Net 2D inputs before assessment or assembly.
+A later 2D compliance task must define typed parent/model geometry, slice axis
+and placement, context-centre semantics, and an invertible reconstruction trace
+with world-coordinate tests.
+
 ---
 
 ## 29. Definition of done for this CAP
@@ -2154,6 +2525,16 @@ This CAP is complete only when all of the following are true:
 - [ ] ISLES24 and ISLES26 deterministic preprocessing are registered by saved `dataset.id` and shared by labeled native workflows and label-free inference without container-side transform copies.
 - [ ] Dataset constructors default to `load_labels=True`; blind inference explicitly uses `False`; `test_flag` remains independent; and no dummy label is created.
 - [ ] Native metadata is captured separately for every case and raw modality before preprocessing/channel merging, with sufficient geometry and trace for restoration.
+- [ ] Every supported 3D nnU-Net conversion preset declares
+  `nnunet.export_space`; native-grid declarations are verified, transformed
+  tensors are written with transformed geometry, and existing source/export
+  provenance records remain distinct.
+- [ ] 3D nnU-Net prediction/reference producers validate both NIfTI geometries
+  and enter evaluation through the same explicit space/geometry contract as
+  repository-model volumes.
+- [ ] Repository and nnU-Net 2D slice paths fail before geometry-aware
+  evaluation until the deferred reconstruction contract is implemented and
+  certified.
 - [ ] The builder/runtime is dataset-agnostic across registered repository adapters and fails clearly for an unavailable adapter.
 - [ ] Native-space restoration passes shape, affine, and world-coordinate tests.
 - [ ] A model tarball can be built from run-dir/checkpoint specifications and loads strictly from `/opt/ml/model/`.

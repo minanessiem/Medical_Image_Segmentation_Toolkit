@@ -166,6 +166,37 @@ class TestDataContractGeneralization(unittest.TestCase):
         del cfg.dataset["fold"]
         validate_converter_contract(cfg)
 
+    def test_validate_converter_contract_requires_explicit_3d_export_space(self):
+        cfg = _base_cfg(
+            dataset_id="isles26",
+            modalities=["T1_RAW"],
+            loader_mode="full_volumes_3d",
+            dim="3d",
+        )
+        with self.assertRaisesRegex(ValueError, "nnunet.export_space"):
+            validate_converter_contract(cfg)
+
+    def test_validate_converter_contract_accepts_known_3d_export_space(self):
+        cfg = _base_cfg(
+            dataset_id="isles26",
+            modalities=["T1_RAW"],
+            loader_mode="full_volumes_3d",
+            dim="3d",
+        )
+        cfg.nnunet.export_space = "model_preprocessed"
+        validate_converter_contract(cfg)
+
+    def test_validate_converter_contract_rejects_unknown_3d_export_space(self):
+        cfg = _base_cfg(
+            dataset_id="isles26",
+            modalities=["T1_RAW"],
+            loader_mode="full_volumes_3d",
+            dim="3d",
+        )
+        cfg.nnunet.export_space = "probably_native"
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            validate_converter_contract(cfg)
+
 
 if __name__ == "__main__":
     unittest.main()

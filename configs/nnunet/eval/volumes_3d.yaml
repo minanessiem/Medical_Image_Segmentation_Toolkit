@@ -1,6 +1,7 @@
 # @package _global_
 #
-# nnU-Net evaluation policy preset for native volume predictions.
+# nnU-Net evaluation policy for 3D volume predictions. Semantic space is
+# supplied by the composed conversion preset through nnunet.export_space.
 
 defaults:
   - /nnunet/eval: default

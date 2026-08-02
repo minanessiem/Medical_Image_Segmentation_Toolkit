@@ -25,6 +25,7 @@ from src.data.loader_stack.subset_contract import (
 )
 from src.data.loader_stack.factory import resolve_loader_contract
 from src.data.loaders import get_dataloaders, validate_dataset_contract
+from src.inference.contracts import SUPPORTED_OUTPUT_SPACES
 from src.utils.train_utils import setup_seeds
 
 
@@ -75,13 +76,30 @@ def _resolve_export_strategy(cfg: DictConfig) -> Any:
     if loader_mode == "online_slices_3d_to_2d" and dim == "2d":
         return SliceExportStrategy()
     if loader_mode == "full_volumes_3d" and dim == "3d":
-        return VolumeExportStrategy()
+        return VolumeExportStrategy(export_space=_resolve_3d_export_space(cfg))
     raise ValueError(
         "nnUNet converter requires one of the supported mode combinations: "
         "(loader_mode='online_slices_3d_to_2d', dim='2d') or "
         "(loader_mode='full_volumes_3d', dim='3d'). "
         f"Got loader_mode='{loader_mode}', dim='{dim}'."
     )
+
+
+def _resolve_3d_export_space(cfg: DictConfig) -> str:
+    value = OmegaConf.select(cfg, "nnunet.export_space", default=None)
+    if not _is_set(value):
+        raise ValueError(
+            "3D nnUNet conversion requires explicit nnunet.export_space. "
+            "Set it to 'native_input' or 'model_preprocessed' in the complete "
+            "conversion preset; the converter will not infer spatial meaning."
+        )
+    export_space = str(value).strip()
+    if export_space not in SUPPORTED_OUTPUT_SPACES:
+        raise ValueError(
+            "nnunet.export_space must be one of "
+            f"{sorted(SUPPORTED_OUTPUT_SPACES)}, got {export_space!r}."
+        )
+    return export_space
 
 
 def _resolve_nnunet_configuration(cfg: DictConfig) -> str:
@@ -147,6 +165,8 @@ def validate_converter_contract(cfg: DictConfig) -> None:
             "(loader_mode='full_volumes_3d', dim='3d'). "
             f"Got loader_mode='{loader_mode}', dim='{dim}'."
         )
+    if is_volume_mode:
+        _resolve_3d_export_space(cfg)
     resolution = resolve_loader_contract(
         dataset_id=dataset_id,
         dataset_name=dataset_name,
@@ -237,10 +257,15 @@ def _prepare_output_directories(request: ConversionRequest) -> None:
 
 def _configure_dataset_for_export(dataset: Any) -> None:
     # Ensure export path gets per-slice metadata and no augmentation side-effects.
-    if hasattr(dataset, "return_metadata"):
-        dataset.return_metadata = True
-    if hasattr(dataset, "augmentation"):
-        dataset.augmentation = None
+    current = dataset
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if hasattr(current, "return_metadata"):
+            current.return_metadata = True
+        if hasattr(current, "augmentation"):
+            current.augmentation = None
+        current = getattr(current, "dataset", None)
 
 
 def _build_dataset_json_payload(
@@ -273,6 +298,8 @@ def _build_dataset_json_payload(
         "test_mode": is_test_mode,
         "num_test": num_test,
     }
+    if mode_key == "volumes_3d":
+        source_config["export_space"] = _resolve_3d_export_space(cfg)
     if "fold" in subset_context:
         source_config["fold"] = subset_context["fold"]
 
@@ -340,6 +367,8 @@ def run_conversion(cfg: DictConfig) -> Dict[str, Any]:
         f"{subset_context['selectors_by_role']['sample']}"
     )
     print(f"Augmentation: {_resolve_augmentation_label(cfg)}")
+    if str(strategy.mode_key) == "volumes_3d":
+        print(f"Export space: {strategy.export_space}")
     print(f"Output: {request.dataset_folder}")
     print(f"{'=' * 60}\n")
 
@@ -496,4 +525,7 @@ def run_conversion(cfg: DictConfig) -> Dict[str, Any]:
         "partitioning": subset_context["partitioning"],
         "train_subset": train_subset,
         "val_subset": val_subset,
+        "export_space": (
+            strategy.export_space if str(strategy.mode_key) == "volumes_3d" else None
+        ),
     }

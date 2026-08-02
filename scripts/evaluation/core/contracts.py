@@ -12,6 +12,8 @@ from typing import Dict, List, Literal, Optional
 
 from torch import Tensor
 
+from src.inference.contracts import SUPPORTED_OUTPUT_SPACES, SpatialGeometry
+
 ScopeName = Literal["all_slices", "foreground_only"]
 
 
@@ -157,6 +159,10 @@ class VolumeSample:
     volume_id: str
     prediction_volume: Tensor
     ground_truth_volume: Tensor
+    prediction_space: Optional[str] = None
+    reference_space: Optional[str] = None
+    prediction_geometry: Optional[SpatialGeometry] = None
+    reference_geometry: Optional[SpatialGeometry] = None
     metadata: Dict[str, object] = field(default_factory=dict)
 
     def validate(self) -> None:
@@ -179,4 +185,46 @@ class VolumeSample:
                 f"pred={tuple(self.prediction_volume.shape)} "
                 f"gt={tuple(self.ground_truth_volume.shape)}."
             )
-
+        spatial_fields = (
+            self.prediction_space,
+            self.reference_space,
+            self.prediction_geometry,
+            self.reference_geometry,
+        )
+        if any(value is not None for value in spatial_fields):
+            if any(value is None for value in spatial_fields):
+                raise ValueError(
+                    "VolumeSample spatial contract requires prediction/reference "
+                    "space and geometry together."
+                )
+            assert self.prediction_space is not None
+            assert self.reference_space is not None
+            assert self.prediction_geometry is not None
+            assert self.reference_geometry is not None
+            if self.prediction_space not in SUPPORTED_OUTPUT_SPACES:
+                raise ValueError(
+                    "VolumeSample prediction_space must be one of "
+                    f"{sorted(SUPPORTED_OUTPUT_SPACES)}, got {self.prediction_space!r}."
+                )
+            if self.reference_space not in SUPPORTED_OUTPUT_SPACES:
+                raise ValueError(
+                    "VolumeSample reference_space must be one of "
+                    f"{sorted(SUPPORTED_OUTPUT_SPACES)}, got {self.reference_space!r}."
+                )
+            if self.prediction_space != self.reference_space:
+                raise ValueError(
+                    "VolumeSample prediction/reference space mismatch: "
+                    f"prediction={self.prediction_space!r}, "
+                    f"reference={self.reference_space!r}."
+                )
+            expected_shape = tuple(int(value) for value in self.prediction_volume.shape[-3:])
+            if self.prediction_geometry.shape != expected_shape:
+                raise ValueError(
+                    "VolumeSample prediction tensor/geometry shape mismatch: "
+                    f"tensor={expected_shape}, geometry={self.prediction_geometry.shape}."
+                )
+            if self.reference_geometry.shape != expected_shape:
+                raise ValueError(
+                    "VolumeSample reference tensor/geometry shape mismatch: "
+                    f"tensor={expected_shape}, geometry={self.reference_geometry.shape}."
+                )
