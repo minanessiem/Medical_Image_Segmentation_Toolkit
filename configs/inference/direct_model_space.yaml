@@ -1,0 +1,6 @@
+defaults:
+  - sliding_window_model_space
+  - _self_
+
+sliding_window:
+  enabled: false

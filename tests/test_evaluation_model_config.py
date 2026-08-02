@@ -133,9 +133,13 @@ class TestEvaluationModelConfig(unittest.TestCase):
             ["DiceNativeCoefficient", "SurfaceDiceMonai"],
         )
 
-    def test_apply_validation_group_override_resolves_defaults(self):
+    def test_apply_validation_group_override_changes_assessment_not_inference(self):
         cfg = OmegaConf.create(
             {
+                "inference": {
+                    "output_space": "model_preprocessed",
+                    "sliding_window": {"enabled": True},
+                },
                 "validation": {
                     "inference": {"mode": "direct"},
                     "metrics": [{"name": "SliceWiseMetricsAggregator"}],
@@ -148,11 +152,8 @@ class TestEvaluationModelConfig(unittest.TestCase):
             ["validation=sliding_window_3d_metrics_full"],
         )
 
-        self.assertEqual(updated.validation.inference.mode, "sliding_window")
-        self.assertEqual(
-            updated.validation.inference.sliding_window.enabled_loader_modes,
-            ["full_volumes_3d", "random_patches_3d"],
-        )
+        self.assertTrue(updated.inference.sliding_window.enabled)
+        self.assertEqual(updated.validation.inference.mode, "direct")
         self.assertEqual(
             updated.validation.metrics[0].name,
             "ThreeDMetricsAggregator",

@@ -304,8 +304,6 @@ def validate_one_epoch(diffusion, val_dl, metrics, logger, global_step, cfg):
     Returns:
         dict: Aggregated validation metrics.
     """
-    diffusion.eval()
-    
     # Check if ensemble is enabled
     use_ensemble = should_ensemble(cfg)
     if use_ensemble:
@@ -314,7 +312,22 @@ def validate_one_epoch(diffusion, val_dl, metrics, logger, global_step, cfg):
         print(f"  Ensemble validation: {num_ensemble_samples} samples, method='{ensemble_method}'")
 
     from src.inference.pipeline import build_model_probability_executor
+    from src.inference.runtime import (
+        AssessmentContext,
+        parse_inference_runtime,
+        validate_runtime_compatibility,
+    )
+
     infer_batch = build_model_probability_executor(backend=diffusion, cfg=cfg)
+    inference_runtime = parse_inference_runtime(
+        OmegaConf.select(cfg, "inference_runtime", default={})
+    )
+    validate_runtime_compatibility(
+        inference=infer_batch.policy,
+        runtime=inference_runtime,
+        assessment=AssessmentContext(requires_ground_truth=True),
+    )
+    diffusion.eval()
     progress_metric_keys = _resolve_validation_progress_metric_keys(cfg)
     
     pbar = tqdm(val_dl, desc="Validation", leave=True)

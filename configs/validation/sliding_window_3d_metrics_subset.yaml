@@ -1,5 +1,5 @@
 defaults:
-  - sliding_window
+  - default
   - _self_
 
 # Fast 3D metric bundle for online sliding-window validation runs.

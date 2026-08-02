@@ -3,10 +3,6 @@ validation_interval: 5000  # Steps between validation runs
 val_batch_size: 16
 multi_gpu_validation: false  # Enable multi-GPU validation sampling (requires multi_gpu training config)
 
-inference:
-  # default behavior for baseline validation runs
-  mode: direct
-
 metrics:
   - name: SliceWiseMetricsAggregator
     params: {}  # Add specific params here if needed, e.g., epsilon: 1e-6

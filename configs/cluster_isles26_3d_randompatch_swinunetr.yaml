@@ -13,6 +13,7 @@ defaults:
   - override /loss: discriminative_dicebce
   - override /logging: 3d_discriminative
   - override /validation: sliding_window_3d_metrics_subset
+  - override /inference: sliding_window_model_space
   - override /training: train_100Kms_ampbfloat16
   - override /augmentation: aggressive_3d
   - _self_
@@ -33,9 +34,10 @@ data_runtime:
 validation:
   val_batch_size: 1
   validation_interval: 5000
-  inference:
-    sliding_window:
-      sw_batch_size: 4
+
+inference:
+  sliding_window:
+    sw_batch_size: 4
 
 logging:
   image_log_interval: 1000

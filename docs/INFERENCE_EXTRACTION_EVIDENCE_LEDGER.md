@@ -13,7 +13,8 @@ E010 the current Cut 3 preprocessing snapshot. E011 records the Cut 4 shared
 probability-execution contracts, and E012 records its real-model Desktop FP32
 parity together with the unresolved FP16 finding. E013 records the accepted
 Cut-5 nnU-Net precursor, and E014 records the accepted Cut 5 evaluator and its
-live repository-model/nnU-Net evidence. E002-E006 and E008 are retained only
+live repository-model/nnU-Net evidence. E015 records the Cut 6 training-
+validation config migration and live shared-predictor validation. E002-E006 and E008 are retained only
 as compact supersession records because they do not represent accepted current
 designs.
 
@@ -1466,6 +1467,157 @@ and the later container/release cuts. Changes to the shared inference executor,
 evaluation contracts, result/reference geometry checks, producer adapters,
 model/checkpoint/config, or relevant MONAI/nibabel behavior require the
 corresponding evidence to be rerun.
+
+---
+
+## Evidence item E015: Cut 6 training-validation migration
+
+### Status and question
+
+| Field | Value |
+|---|---|
+| Evidence ID | `E015` |
+| Status | `ACCEPTED` for Cut 6 Desktop validation and live replays |
+| Base commit | `b6e07bb0ba9e985fd722dd788b3c4a0c1d7c875a` plus the uncommitted Cut 6 diff |
+| Preserved legacy contract | Saved configs with only `validation.inference` remain translated when top-level `inference` is absent |
+
+E015 asks whether new training configs obtain prediction behavior from the
+shared top-level inference policy, whether current 2D and 3D profiles preserve
+their direct and sliding-window behavior respectively, and whether the
+training-validation consumer can execute the accepted shared probability path
+without changing model state or established metrics.
+
+### Config and runtime contract
+
+The base `local` and `cluster` training configs compose
+`inference=direct_model_space` and `inference_runtime=native`. The direct
+policy inherits the complete model-space policy, including model-owned ROI,
+and changes only `sliding_window.enabled=false`. Each current 3D training
+profile explicitly overrides this with `sliding_window_model_space`. Existing
+cluster 3D profiles retain window batch four, while local 3D profiles retain
+the policy default of one. Prediction fields no longer live in new validation
+presets.
+
+Training validation validates that the runtime permits access to ground truth
+before placing the model in evaluation mode or executing a prediction. The
+trainer remains responsible for labels, metric lifecycle, progress, logging,
+and restoring training mode. The shared executor remains responsible for
+probability generation. Mean ensembling is explicitly dimension agnostic;
+the current 2D-only soft-STAPLE implementation now fails clearly when selected
+for 3D data.
+
+### Desktop verification
+
+Verification ran in the isolated Desktop WSL worktree `cut6_20260802a` using
+Python 3.10.12 from `MedSegDiff_env`. The focused suite passed 81/81 tests and
+covered training config composition (including the named 2D DDP
+profiles), policy resolution, runtime guards, ensemble semantics, trainer
+validation, and the evaluation consumers affected by validation-group
+ownership. The affected regression suite passed 79/79
+tests and covered checkpoint selection/save/load/resume, discriminative and
+ablation config composition, inference contracts/predictors/sliding window,
+the model-volume evaluator, evaluation pipeline/SLURM routing, and run naming.
+After review removed the empty legacy `validation/sliding_window` group, the
+24 directly affected training/evaluation composition tests passed again with
+the two 3D metric bundles inheriting `validation/default` directly.
+
+Durable test-log hashes:
+
+```text
+cut6_focused_tests_final.log
+0de6a5c0da273f0085f40c6dad206e00e7d798f683f3feab8012769a9de56e8c
+
+cut6_affected_tests.log
+3940f068568812a96360331ac6dec755264755f65685b85a15805e986a0e3c8d
+```
+
+### Live repository-model validation
+
+The live exercise used the pinned E014 p5n1 DynUNet checkpoint and the same
+four locked cases, through `src.training.trainer.validate_one_epoch` and the
+real shared model probability executor. It ran on an NVIDIA GeForce RTX 4070
+Ti SUPER with FP32, ROI `128x128x128`, model-preprocessed output, overlap
+`0.5`, and the migrated cluster window batch of four.
+
+The four-case mean Dice was `0.5165785551`; E014 recorded
+`0.5165785849`, a difference of approximately `-2.98e-8`. The run completed in
+13.95 seconds. The resolved policy source was `explicit_top_level`, the
+runtime profile was `native`, all four validation batches completed, model
+training mode was restored, and the complete model-state digest was identical
+before and after validation:
+
+```text
+model state before and after
+5417c2a9d5be69d4319fc171c04904995b0d5e4666fd2655a52bac0a2cbd7ff4
+
+cut6_live_validation.json
+75f1a16c2841e38bacdc6d8ddc6ffcd21e475546c617ff8bea0e160338037aa9
+
+cut6_live_validation.log
+807539ba2a4b86e94b01979ab4de60e4669edbbb50311da5e9c1b04720531cfc
+```
+
+### Legacy-policy and 3D mean-ensemble replays
+
+Two additional real-model replays exercised the remaining Cut 6 migration
+boundaries with the same checkpoint, four cases, FP32 policy, and window batch
+four.
+
+The canonical run resolved from `cfg.inference` with source
+`explicit_top_level`; the legacy run removed that top-level policy and resolved
+the pinned saved run's unmodified `validation.inference` with source
+`legacy_validation`. Both resolved to exactly the same typed policy. All four
+floating-point probability volumes were byte-identical between the two paths,
+including their shapes and per-case SHA-256 digests. Every aggregate metric
+was also identical; both runs produced Dice `0.5165785551`, HD95
+`12.4736900330`, and surface Dice `0.7291332483`.
+
+The 3D mean-ensemble replay used two deterministic DynUNet predictions per
+case. For every case, both member probability volumes were byte-identical to
+the canonical single prediction, the mean output was byte-identical to those
+members, and the complete metric result matched the canonical run. This
+exercises the real `[N,B,C,D,H,W]` mean path rather than only its synthetic
+unit fixture.
+
+Across the canonical, legacy, and ensemble executions, the complete model
+state retained digest
+`5417c2a9d5be69d4319fc171c04904995b0d5e4666fd2655a52bac0a2cbd7ff4`
+and training mode was restored after every replay. Durable replay artifacts:
+
+```text
+cut6_replay_tests.json
+b199ade9dc97e690eac0deb7c60aa0d3b25be2aec4bb5308fdf94ef8147ae3b5
+
+cut6_replay_tests.log
+e3adc5ef1ed5699f69c2d30885c85db2ae4629a10c172f10df663a7fa29aad95
+```
+
+Artifacts remain outside Git under:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut6_20260802a/
+```
+
+### Acceptance scope and invalidation
+
+E015 establishes on the pinned Desktop snapshot that canonical training
+profiles compose the new policy/runtime ownership correctly, training
+validation uses the same probability executor as evaluation, ground-truth
+runtime incompatibility fails before prediction, existing metrics are
+numerically preserved on the locked live cases, and validation does not mutate
+model state. It additionally establishes byte-level probability parity between
+the canonical and legacy policy sources and correct real-volume 3D mean
+ensembling for the deterministic discriminative backend. The Cut 6 diff does
+not alter `train_one_epoch`, optimization,
+loss, scheduler, EMA, DP/DDP construction, or checkpoint-writing logic; their
+affected regression tests remain green.
+
+E015 does not certify a new end-to-end optimization run, LRZ/`.sqsh` parity,
+T4 execution, FP16, 2D geometry-aware evaluation, native-space inversion, or
+Grand Challenge container behavior. Changes to training config composition,
+runtime assessment, shared probability execution, ensemble semantics, the
+pinned model/input state, or relevant PyTorch/MONAI numerical behavior require
+the corresponding evidence to be rerun.
 
 ---
 

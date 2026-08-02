@@ -49,6 +49,20 @@ class TestMeanEnsemble(unittest.TestCase):
         expected = torch.full((1, 1, 2, 2), 0.5)
         self.assertTrue(torch.allclose(result, expected))
 
+    def test_3d_probabilities_average_across_only_the_member_axis(self):
+        samples = torch.stack(
+            (
+                torch.zeros((1, 1, 2, 3, 4)),
+                torch.ones((1, 1, 2, 3, 4)),
+            ),
+            dim=0,
+        )
+
+        result = mean_ensemble(samples)
+
+        self.assertEqual(result.shape, (1, 1, 2, 3, 4))
+        torch.testing.assert_close(result, torch.full_like(result, 0.5))
+
 
 class TestSoftStaple(unittest.TestCase):
     """Tests for soft_staple function."""
@@ -113,6 +127,16 @@ class TestEnsemblePredictions(unittest.TestCase):
         with self.assertRaises(ValueError) as context:
             ensemble_predictions(samples, cfg)
         self.assertIn("Unknown ensemble method", str(context.exception))
+
+    def test_soft_staple_rejects_3d_probabilities(self):
+        samples = torch.rand(3, 1, 1, 2, 3, 4)
+        cfg = OmegaConf.create({
+            'method': 'soft_staple',
+            'soft_staple': {'max_iters': 3, 'tolerance': 0.02}
+        })
+
+        with self.assertRaisesRegex(ValueError, "soft_staple.*2D"):
+            ensemble_predictions(samples, cfg)
 
 
 class TestShouldEnsemble(unittest.TestCase):

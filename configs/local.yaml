@@ -14,6 +14,8 @@ defaults:
   - loss: mse_loss_only
   - diffusion: openai_ddpm_100ts_debug
   - validation: default
+  - inference: direct_model_space
+  - inference_runtime: native
 
 random_seed: 42
 mode: train

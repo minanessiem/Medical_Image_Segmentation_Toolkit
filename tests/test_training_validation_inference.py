@@ -6,6 +6,8 @@ from unittest.mock import patch
 import torch
 from omegaconf import OmegaConf
 
+from src.inference.policy import parse_inference_policy
+from src.inference.contracts import InvalidInferenceRuntimeError
 from src.training.trainer import validate_one_epoch
 
 
@@ -61,6 +63,11 @@ class TestTrainingValidationInference(unittest.TestCase):
             )
             return torch.full_like(conditioned_image[:, :1], 0.25)
 
+        executor.policy = parse_inference_policy(
+            {"sliding_window": {"enabled": False}},
+            model_roi=(2, 2, 2),
+        )
+
         with patch(
             "src.inference.pipeline.build_model_probability_executor",
             return_value=executor,
@@ -87,6 +94,54 @@ class TestTrainingValidationInference(unittest.TestCase):
         self.assertEqual(metric.reset_calls, 1)
         self.assertEqual(diffusion.eval_calls, 1)
         self.assertEqual(diffusion.train_calls, 1)
+
+    def test_validation_rejects_runtime_that_forbids_ground_truth(self):
+        cfg = OmegaConf.create(
+            {
+                "device": "cpu",
+                "validation": {
+                    "ensemble": {"enabled": False},
+                },
+                "inference_runtime": {
+                    "profile": "native",
+                    "constraints": {"allow_ground_truth": False},
+                },
+            }
+        )
+        diffusion = DummyDiffusion()
+        image = torch.zeros((1, 1, 2, 2, 2), dtype=torch.float32)
+        label = torch.ones((1, 1, 2, 2, 2), dtype=torch.float32)
+        executor_calls = []
+
+        def executor(conditioned_image, progress_label=None, show_window_progress=True):
+            executor_calls.append(conditioned_image)
+            return torch.full_like(conditioned_image[:, :1], 0.25)
+
+        executor.policy = parse_inference_policy(
+            {"sliding_window": {"enabled": False}},
+            model_roi=(2, 2, 2),
+        )
+
+        with patch(
+            "src.inference.pipeline.build_model_probability_executor",
+            return_value=executor,
+        ):
+            with self.assertRaisesRegex(
+                InvalidInferenceRuntimeError,
+                "does not permit ground truth",
+            ):
+                validate_one_epoch(
+                    diffusion=diffusion,
+                    val_dl=[(image, label, ["case-1"])],
+                    metrics=[RecordingMetric()],
+                    logger=None,
+                    global_step=10,
+                    cfg=cfg,
+                )
+
+        self.assertEqual(executor_calls, [])
+        self.assertEqual(diffusion.eval_calls, 0)
+        self.assertEqual(diffusion.train_calls, 0)
 
 
 if __name__ == "__main__":

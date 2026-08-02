@@ -364,6 +364,7 @@ def validate_training_runtime_contract(cfg: DictConfig) -> None:
     Fail fast for unsupported training-runtime combinations.
 
     Current guardrails:
+    - 3D + soft-STAPLE validation ensemble for every model family
     - 3D + diffusion (non-discriminative) + sampling snapshot logging
     - 3D + diffusion (non-discriminative) + validation ensemble
     - 3D + diffusion (non-discriminative) + ensembled image validation logging
@@ -373,6 +374,19 @@ def validate_training_runtime_contract(cfg: DictConfig) -> None:
     diffusion_type = str(OmegaConf.select(cfg, "diffusion.type", default="")).strip()
     is_discriminative = diffusion_type.lower() == "discriminative"
     is_diffusion_3d = is_3d and not is_discriminative
+
+    ensemble_enabled = bool(
+        OmegaConf.select(cfg, "validation.ensemble.enabled", default=False)
+    )
+    ensemble_method = str(
+        OmegaConf.select(cfg, "validation.ensemble.method", default="unknown")
+    ).strip().lower()
+    if is_3d and ensemble_enabled and ensemble_method == "soft_staple":
+        raise ValueError(
+            "Unsupported runtime combination: validation ensemble method "
+            "'soft_staple' is 2D-only and cannot be enabled for data_mode.dim='3d'. "
+            "Use validation.ensemble.method='mean' or disable validation ensembling."
+        )
 
     if not is_diffusion_3d:
         return
@@ -384,10 +398,7 @@ def validate_training_runtime_contract(cfg: DictConfig) -> None:
             "3D diffusion sampling snapshots are disabled for training-time logging."
         )
 
-    if bool(OmegaConf.select(cfg, "validation.ensemble.enabled", default=False)):
-        ensemble_method = str(
-            OmegaConf.select(cfg, "validation.ensemble.method", default="unknown")
-        )
+    if ensemble_enabled:
         raise ValueError(
             "Unsupported runtime combination: data_mode.dim='3d' with "
             f"diffusion.type='{diffusion_type}' and validation.ensemble.enabled=true "

@@ -514,6 +514,7 @@ scripts/gc_submission_builder/
     fixtures/...
 
 configs/inference/
+  direct_model_space.yaml
   sliding_window_model_space.yaml
   sliding_window_native.yaml
   sliding_window_native_fp16.yaml
@@ -529,6 +530,9 @@ policy resolution, existing `model.spatial_dims` / `data_mode.dim` selects
 `dataset.preprocessing_configs.roi.slice_2d` or `volume_3d`; those dataset ROI
 values are themselves derived from `model.image_size`. The `native` child
 overrides only output space, and `native_fp16` overrides only precision. Thus
+`direct_model_space` inherits the same complete model-space policy and changes
+only `sliding_window.enabled=false`; it preserves established direct 2D
+training validation without introducing a dimension-specific direct preset.
 inference policy neither duplicates 2D/3D model structure nor requires changes
 to established data-mode config families. The 2D-compatible config contract
 does not add a diffusion predictor or expand the initial ISLES26 3D backend
@@ -1333,7 +1337,9 @@ Cuts 0-3.
 - `scripts/evaluation/io/model_volumes.py`
 - `src/diffusion/discriminative_adapter.py`, only for the minimal generic predictor boundary if required; do not move or duplicate its output parser
 - existing model adapters and `src/losses/discriminative_deep_supervision.py` as characterized backend-owned behavior, not inference-package migration targets
-- `configs/validation/sliding_window.yaml` as a legacy input and migration target
+- `configs/validation/sliding_window.yaml` as the legacy Cut 4 migration input;
+  Cut 6 removes this now-empty compatibility group after the 3D metric bundles
+  inherit `validation/default` directly
 - new or extended `tests/test_inference_discriminative_predictor.py`
 - new `tests/test_inference_sliding_window.py`
 - existing validation-inferer, trainer-validation, and model-volume evaluation tests, migrated to the new direct boundary
@@ -1737,12 +1743,25 @@ parity already green.
    - checkpoint selection;
    - validation logging.
 3. Move prediction execution settings out of validation presets and into the already established, composed top-level `configs/inference/` presets.
+   Compose `direct_model_space` for base 2D training profiles and override it
+   with `sliding_window_model_space` for the current 3D discriminative
+   profiles. Both presets derive ROI from the model-owned dataset contract.
+   Remove the empty legacy `validation/sliding_window` group and make the two
+   `sliding_window_3d_metrics_*` assessment bundles inherit `validation/default`
+   directly; their names describe the 3D validation use case but do not own
+   prediction execution.
 4. Keep validation config responsible for metrics, cadence, progress reporting, and checkpoint selection.
 5. Preserve old run compatibility by translating `cfg.validation.inference` when `cfg.inference` is absent.
-6. Preserve existing ensemble behavior for supported modes, but do not enable 3D soft STAPLE.
-7. Leave `train_one_epoch`, optimizer, scheduler, loss, gradient scaling, EMA, DP/DDP, and checkpoint writing unchanged.
-8. Leave diffusion sampling snapshots training-specific.
-9. Optionally route ordinary ensembled preview images through the predictor later, but do not make this a release blocker.
+6. Compose `inference_runtime=native` for new training profiles and validate
+   that training validation is permitted to access ground truth before model
+   execution. Historical configs without a runtime profile retain the native
+   compatibility default.
+7. Preserve existing ensemble behavior for supported modes, but reject current
+   2D-only soft STAPLE for every 3D model family. Mean aggregation remains
+   spatial-dimension agnostic.
+8. Leave `train_one_epoch`, optimizer, scheduler, loss, gradient scaling, EMA, DP/DDP, and checkpoint writing unchanged.
+9. Leave diffusion sampling snapshots training-specific.
+10. Optionally route ordinary ensembled preview images through the predictor later, but do not make this a release blocker.
 
 ### Expected tests and testing components
 

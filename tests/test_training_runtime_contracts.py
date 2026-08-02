@@ -29,6 +29,7 @@ class TestTrainingRuntimeContracts(unittest.TestCase):
     def test_rejects_3d_diffusion_validation_ensemble(self):
         cfg = _base_cfg()
         cfg.validation.ensemble.enabled = True
+        cfg.validation.ensemble.method = "mean"
         with self.assertRaisesRegex(ValueError, "validation.ensemble.enabled=true"):
             validate_training_runtime_contract(cfg)
 
@@ -43,11 +44,20 @@ class TestTrainingRuntimeContracts(unittest.TestCase):
     def test_allows_3d_discriminative(self):
         cfg = _base_cfg()
         cfg.diffusion.type = "Discriminative"
+        cfg.validation.ensemble.method = "mean"
         cfg.logging.enable_sampling_snapshots = True
         cfg.validation.ensemble.enabled = True
         cfg.validation.ensembled_image.enabled = True
         # Discriminative is explicitly allowed by this guard.
         validate_training_runtime_contract(cfg)
+
+    def test_rejects_3d_soft_staple_for_discriminative_models(self):
+        cfg = _base_cfg()
+        cfg.diffusion.type = "Discriminative"
+        cfg.validation.ensemble.enabled = True
+
+        with self.assertRaisesRegex(ValueError, "soft_staple.*2D"):
+            validate_training_runtime_contract(cfg)
 
     def test_allows_2d_diffusion(self):
         cfg = _base_cfg()

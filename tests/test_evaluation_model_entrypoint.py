@@ -99,7 +99,8 @@ class TestEvaluateModelEntrypoint(unittest.TestCase):
             )
 
         self.assertEqual(cfg.dataset.active_subsets.val, "val_full")
-        self.assertEqual(cfg.validation.inference.mode, "sliding_window")
+        self.assertTrue(cfg.inference.sliding_window.enabled)
+        self.assertEqual(cfg.validation.inference.mode, "direct")
         self.assertEqual(cfg.evaluation.threshold_protocol.mode, "sweep")
 
     def test_main_calls_pipeline_and_prints_outputs(self):

@@ -263,9 +263,10 @@ class TestInferencePolicyParsing(unittest.TestCase):
     def test_canonical_policy_files_parse(self):
         config_dir = REPOSITORY_ROOT / "configs" / "inference"
         expected = {
-            "sliding_window_model_space": ("model_preprocessed", "fp32"),
-            "sliding_window_native": ("native_input", "fp32"),
-            "sliding_window_native_fp16": ("native_input", "fp16"),
+            "direct_model_space": ("model_preprocessed", "fp32", False),
+            "sliding_window_model_space": ("model_preprocessed", "fp32", True),
+            "sliding_window_native": ("native_input", "fp32", True),
+            "sliding_window_native_fp16": ("native_input", "fp16", True),
         }
 
         data_modes = {
@@ -292,10 +293,10 @@ class TestInferencePolicyParsing(unittest.TestCase):
                     observed = (
                         policy.output_space,
                         policy.precision,
+                        policy.sliding_window.enabled,
                     )
                     self.assertEqual(observed, expected_values)
                     self.assertEqual(policy.sliding_window.roi_size, expected_roi)
-                    self.assertTrue(policy.sliding_window.enabled)
                     self.assertEqual(policy.sliding_window.sw_batch_size, 1)
                     merged_policy = composed.inference
                     self.assertNotIn("roi_size", merged_policy.sliding_window)
@@ -316,6 +317,7 @@ class TestInferencePolicyParsing(unittest.TestCase):
     def test_canonical_policy_files_use_narrow_inheritance_overrides(self):
         config_dir = REPOSITORY_ROOT / "configs" / "inference"
         expected_keys = {
+            "direct_model_space.yaml": {"defaults", "sliding_window"},
             "sliding_window_native.yaml": {"defaults", "output_space"},
             "sliding_window_native_fp16.yaml": {"defaults", "precision"},
         }
@@ -328,6 +330,7 @@ class TestInferencePolicyParsing(unittest.TestCase):
         self.assertEqual(
             {path.name for path in config_dir.glob("*.yaml")},
             {
+                "direct_model_space.yaml",
                 "sliding_window_model_space.yaml",
                 "sliding_window_native.yaml",
                 "sliding_window_native_fp16.yaml",

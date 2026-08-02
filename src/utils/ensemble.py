@@ -24,13 +24,11 @@ def mean_ensemble(samples: Tensor) -> Tensor:
     equally to the final prediction. Effective when samples have similar quality.
     
     Args:
-        samples: Tensor of shape [N, B, C, H, W] where N is number of samples,
-                 B is batch size, C is channels (typically 1 for segmentation),
-                 H and W are spatial dimensions.
-                 Values should be probabilities in [0, 1].
+        samples: Tensor of shape [N, B, C, *spatial] where N is the number of
+                 samples. Values should be probabilities in [0, 1].
     
     Returns:
-        Tensor of shape [B, C, H, W] with averaged predictions.
+        Tensor of shape [B, C, *spatial] with averaged predictions.
     
     Example:
         >>> samples = torch.rand(5, 2, 1, 64, 64)  # 5 samples, batch 2
@@ -184,6 +182,12 @@ def ensemble_predictions(samples: Tensor, ensemble_cfg: DictConfig) -> Tensor:
     if method == 'mean':
         return mean_ensemble(samples)
     elif method == 'soft_staple':
+        if samples.ndim == 6:
+            raise ValueError(
+                "validation ensemble method 'soft_staple' is 2D-only and cannot "
+                "combine 3D probability tensors [N,B,C,D,H,W]. Use method='mean' "
+                "or keep 3D validation ensembling disabled."
+            )
         staple_cfg = ensemble_cfg.soft_staple
         return soft_staple(
             samples,
@@ -299,4 +303,3 @@ def should_log_ensembled_image(cfg: DictConfig, global_step: int) -> bool:
     
     # Check if current step matches interval
     return global_step % interval == 0
-

@@ -1,5 +1,5 @@
 defaults:
-  - sliding_window
+  - default
   - _self_
 
 # Full 3D metric bundle for offline/expensive validation runs.
