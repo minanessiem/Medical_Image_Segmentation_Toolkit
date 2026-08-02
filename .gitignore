@@ -28,3 +28,7 @@ tests/augmentation_visualizations/
 
 
 outputs/
+
+# Local agent and remote-infrastructure guidance; intentionally not public.
+/AGENTS.md
+/docs/REMOTE_CONNECTION_RUNBOOK.md

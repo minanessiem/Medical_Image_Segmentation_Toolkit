@@ -376,7 +376,7 @@ HEAD and tracked worktree state against these pinned values.
 | Checkpoint | `models/best/best_model_step_040000_dice_3d_0.5724.pth` |
 | Checkpoint SHA-256 | `120c93ee6a32f79829bf8a6b2d3ab7db59861f865ad1e8a37889f87ab0c82441` |
 | Training revision | `60e24ecfa8984673d20586b48a361cace7095bfd`, strongly inferred from LRZ reflog because the historical run did not record it |
-| Versioned baseline record | `tests/fixtures/inference/isles26_dynunet_p5n1_baseline.json` |
+| Durable baseline record | This E001 ledger item; large measured artifacts remain on LRZ |
 
 The run used the repaired p5n1 saved config and raw, non-EMA checkpoint. The
 baseline record describes the config repair and pre-repair backup.
