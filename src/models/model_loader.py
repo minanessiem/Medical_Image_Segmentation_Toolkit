@@ -12,6 +12,10 @@ from src.models.checkpoint_loading import load_model_state_dict_compat
 from src.models.model_factory import build_model
 
 
+class StrictModelLoadError(RuntimeError):
+    """Raised when a release-boundary checkpoint is not an exact model match."""
+
+
 def load_checkpoint_into_model(
     model: nn.Module,
     checkpoint_path: Path,
@@ -42,3 +46,37 @@ def load_model(
     model.to(resolved_device)
     model.eval()
     return model, missing_keys, unexpected_keys
+
+
+def load_model_strict(
+    cfg: DictConfig,
+    checkpoint_path: Path,
+    device: str | torch.device,
+) -> nn.Module:
+    """Load one release model and reject every missing or unexpected key."""
+
+    model, missing_keys, unexpected_keys = load_model(
+        cfg,
+        checkpoint_path=checkpoint_path,
+        device=device,
+    )
+    if missing_keys or unexpected_keys:
+        details = []
+        if missing_keys:
+            details.append(f"missing keys={missing_keys}")
+        if unexpected_keys:
+            details.append(f"unexpected keys={unexpected_keys}")
+        raise StrictModelLoadError(
+            "Release checkpoint loading requires an exact state-dict match; "
+            + "; ".join(details)
+            + "."
+        )
+    return model
+
+
+__all__ = [
+    "StrictModelLoadError",
+    "load_checkpoint_into_model",
+    "load_model",
+    "load_model_strict",
+]

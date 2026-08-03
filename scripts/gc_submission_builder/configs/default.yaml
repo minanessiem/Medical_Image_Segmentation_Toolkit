@@ -1,0 +1,10 @@
+run_dir: null
+checkpoint: null
+use_ema: false
+inference_policy: ../../../configs/inference/sliding_window_native_fp16.yaml
+output_dir: null
+archive_name: null
+validation_device: cpu
+code_commit: null
+code_dirty: null
+created_at_utc: null

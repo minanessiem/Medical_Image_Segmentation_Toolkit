@@ -9,7 +9,12 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 
-from src.models.model_loader import load_checkpoint_into_model, load_model
+from src.models.model_loader import (
+    StrictModelLoadError,
+    load_checkpoint_into_model,
+    load_model,
+    load_model_strict,
+)
 
 
 class TinyModel(nn.Module):
@@ -93,6 +98,28 @@ class TestSharedModelLoader(unittest.TestCase):
         self.assertIs(build_diffusion_mock.call_args.args[0], base_model)
         self.assertIs(build_diffusion_mock.call_args.args[1], cfg)
         self.assertEqual(str(build_diffusion_mock.call_args.args[2]), "cpu")
+
+    def test_strict_release_loader_rejects_partial_compatibility_load(self):
+        adapter = TinyModel()
+        partial_state = dict(adapter.state_dict())
+        partial_state.pop("layer.bias")
+        cfg = OmegaConf.create({"diffusion": {"type": "Discriminative"}})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint_path = Path(tmp) / "model.pth"
+            torch.save(partial_state, checkpoint_path)
+            with patch(
+                "src.models.model_loader.build_model",
+                return_value=TinyModel(),
+            ), patch(
+                "src.models.model_loader.Diffusion.build_diffusion",
+                return_value=adapter,
+            ):
+                with self.assertRaisesRegex(
+                    StrictModelLoadError,
+                    "missing keys.*layer.bias",
+                ):
+                    load_model_strict(cfg, checkpoint_path, device="cpu")
 
 
 if __name__ == "__main__":

@@ -634,10 +634,15 @@ The initial builder command accepts one pair of:
 
 Checkpoint discovery may reuse evaluation conventions, but the resolved output must identify one exact file. Ambiguous matches are errors.
 
+By default, the archive filename is the complete selected training-run directory
+name with `.tar.gz` appended. The builder does not abbreviate or synthesize a
+different model name. An explicit builder override may select another root-level
+`.tar.gz` filename.
+
 The final archive is created with root-relative contents, equivalent to:
 
 ```bash
-tar -czvf algorithmmodel.tar.gz -C /path/to/algorithmmodel .
+tar -czvf <training-run-directory-name>.tar.gz -C /path/to/algorithmmodel .
 ```
 
 The trailing `.` is required so extraction populates `/opt/ml/model/` directly rather than adding an unintended enclosing directory.
@@ -2227,7 +2232,9 @@ Cuts 1-4 and the complete Cut 7A-7E chain; Cut 8 if the final enhancement policy
 3. Reject a missing `.hydra/config.yaml`, ambiguous checkpoint, unsupported initial-release model contract, or saved `dataset.id` without an implemented preprocessing adapter.
 4. Generate SHA-256 hashes and a versioned manifest.
 5. Validate the staged artifact by loading its singular model through the shared model-domain and inference paths before packaging.
-6. Create `algorithmmodel.tar.gz` with contents rooted correctly for `/opt/ml/model/` extraction.
+6. Create `<training-run-directory-name>.tar.gz` by default, with an explicit
+   filename override available and contents rooted correctly for
+   `/opt/ml/model/` extraction.
 7. Support independent `build-model` and combined `build-all` commands.
 8. Make archive generation deterministic where practical by normalizing metadata timestamps and file order, or document any unavoidable nondeterminism.
 9. Emit a local build report containing source paths, artifact paths, sizes, hashes, and validation result.
