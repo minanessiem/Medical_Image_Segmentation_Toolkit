@@ -54,6 +54,11 @@ def restore_probability_to_native(
         probability.as_tensor() if isinstance(probability, MetaTensor) else probability
     )
     if not geometry_changed:
+        validate_output_geometry(
+            observed_shape=observed_shape,
+            observed_affine=np.asarray(spatial_trace.model.affine, dtype=np.float64),
+            expected=spatial_trace.original,
+        )
         return probability_tensor.detach().to(
             device="cpu",
             dtype=torch.float32,

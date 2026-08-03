@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from monai.data import MetaTensor
 
+from src.inference.case_producer import build_case_producer
 from src.inference.contracts import (
     InvalidPredictionError,
     NativeImageMetadata,
@@ -75,6 +76,36 @@ def _case(model_shape, model_affine, native_shape, native_affine):
     )
 
 
+def _write_nifti(path, data, affine):
+    image = nib.Nifti1Image(data, affine)
+    image.set_qform(affine, code=1)
+    image.set_sform(affine, code=2)
+    nib.save(image, str(path))
+
+
+def _dataset_cfg():
+    return {
+        "modalities": ["T1_RAW"],
+        "preprocessing_configs": {
+            "common": {
+                "orientation": {"enabled": True, "axcodes": "RAS"},
+                "spacing": {
+                    "enabled": True,
+                    "allow_native_spacing": False,
+                    "pixdim": [1.0, 1.0, 1.0],
+                    "interpolation": {"image": "bilinear", "label": "nearest"},
+                },
+            },
+            "roi": {"volume_3d": [5, 7, 3], "slice_2d": [5, 7]},
+            "online_slices_3d_to_2d": {
+                "slice_axis": 2,
+                "slice_order": "sequential",
+            },
+            "full_volumes_3d": {"pad_to_divisible": False},
+        },
+    }
+
+
 class DummyExecutor:
     def __init__(self, probability, *, output_space, threshold=0.5):
         self.probability = probability
@@ -104,6 +135,17 @@ class TestInferenceNativeOutput(unittest.TestCase):
         torch.testing.assert_close(result.probability, probability)
         self.assertEqual(tuple(result.mask.shape), tuple(probability.shape))
         self.assertFalse(result.provenance["spatial_restoration"]["applied"])
+        self.assertEqual(result.provenance["output_space"], "model_preprocessed")
+        self.assertTrue(
+            result.provenance["spatial_validation"][
+                "shape_matches_declared_geometry"
+            ]
+        )
+        self.assertFalse(
+            result.provenance["spatial_validation"][
+                "native_world_coordinates_validated"
+            ]
+        )
 
     def test_native_result_restores_probability_then_thresholds(self):
         case = _case(
@@ -129,6 +171,77 @@ class TestInferenceNativeOutput(unittest.TestCase):
         self.assertEqual(result.output_space, "native_input")
         self.assertIs(result.native_reference, case.native_metadata["T1"])
         self.assertTrue(result.provenance["spatial_restoration"]["applied"])
+        self.assertTrue(
+            result.provenance["spatial_validation"][
+                "native_world_coordinates_validated"
+            ]
+        )
+
+    def test_finalized_case_producer_trace_restores_and_writes_native_grid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            image_path = base / "t1.nii.gz"
+            label_path = base / "label.nii.gz"
+            native_affine = np.array(
+                [
+                    [-1.4, 0.0, 0.0, 12.0],
+                    [0.0, 2.1, 0.0, -3.0],
+                    [0.0, 0.0, 3.2, 4.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                dtype=np.float64,
+            )
+            shape = (5, 7, 3)
+            _write_nifti(
+                image_path,
+                np.arange(np.prod(shape), dtype=np.float32).reshape(shape),
+                native_affine,
+            )
+            _write_nifti(
+                label_path,
+                np.zeros(shape, dtype=np.uint8),
+                native_affine,
+            )
+            labeled = build_case_producer(
+                dataset_id="isles26",
+                dataset_cfg=_dataset_cfg(),
+                load_labels=True,
+            )(
+                {
+                    "caseID": "producer-roundtrip",
+                    "T1": [str(image_path)],
+                    "label": str(label_path),
+                }
+            )
+            self.assertNotEqual(
+                labeled.case.spatial_trace.model,
+                labeled.case.spatial_trace.original,
+            )
+            probability = torch.full_like(labeled.case.image, 0.75)
+
+            result = predict_preprocessed_case(
+                DummyExecutor(probability, output_space="native_input"),
+                labeled.case,
+                show_window_progress=False,
+            )
+            output_path = base / "restored.nii.gz"
+            validation = write_native_prediction_mask(result, output_path)
+            reopened = nib.load(str(output_path))
+
+            self.assertEqual(tuple(result.probability.shape[2:]), shape)
+            self.assertEqual(reopened.shape, shape)
+            np.testing.assert_allclose(
+                reopened.affine,
+                native_affine,
+                rtol=0,
+                atol=1e-5,
+            )
+            self.assertEqual(validation["spatial_validation"], "passed")
+            self.assertTrue(
+                result.provenance["spatial_validation"][
+                    "native_world_coordinates_validated"
+                ]
+            )
 
     def test_native_output_uses_each_cases_own_grid(self):
         first = _case((3, 3, 3), np.eye(4), (5, 5, 5), np.diag([0.5, 0.5, 0.5, 1.0]))

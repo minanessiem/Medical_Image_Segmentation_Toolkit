@@ -23,7 +23,11 @@ from src.inference.predictors import (
     validate_predictor_capabilities,
 )
 from src.inference.sliding_window import predict_sliding_window_probabilities
-from src.inference.spatial import restore_probability_to_native, threshold_probability
+from src.inference.spatial import (
+    WORLD_COORDINATE_TOLERANCE_MM,
+    restore_probability_to_native,
+    threshold_probability,
+)
 
 
 @dataclass(frozen=True)
@@ -134,7 +138,18 @@ def predict_preprocessed_case(
         provenance={
             "case_id": case.case_id,
             "inference_policy_source": str(executor.policy_source),
+            "output_space": output_space,
             "threshold": float(executor.policy.decision.threshold),
+            "spatial_validation": {
+                "status": "passed",
+                "shape_matches_declared_geometry": True,
+                "native_world_coordinates_validated": output_space == "native_input",
+                "world_coordinate_tolerance_mm": (
+                    WORLD_COORDINATE_TOLERANCE_MM
+                    if output_space == "native_input"
+                    else None
+                ),
+            },
             "spatial_restoration": {
                 "applied": restoration_applied,
                 "interpolation": "continuous_linear" if restoration_applied else None,
