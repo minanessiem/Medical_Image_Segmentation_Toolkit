@@ -1,6 +1,5 @@
 import functools
 import torch
-from matplotlib import pyplot as plt
 
 def device_grad_decorator(device=None, no_grad=False):
     """
@@ -54,6 +53,9 @@ def visualize_img(ax, img, title, is_mask=False):
         title (str): The title for the image.
         is_mask (bool, optional): If True, display the image in grayscale. Defaults to False.
     """
+    # Keep the plotting dependency out of model/runtime imports. The helper's
+    # caller supplies the matplotlib axis, so no module-level pyplot import is
+    # required for training or inference consumers.
     ax.set_title(title)
     ax.imshow(img, cmap='gray' if is_mask else None)
     ax.axis('off')

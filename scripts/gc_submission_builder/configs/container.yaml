@@ -1,0 +1,7 @@
+image_name: medseg-diffusion-gc
+image_tag: cut10
+dockerfile: ../container/Dockerfile
+interface_manifest: interface_manifest.fixture.yaml
+output_dir: ../../../../gc_submission_artifacts
+archive_name: null
+platform: linux/amd64

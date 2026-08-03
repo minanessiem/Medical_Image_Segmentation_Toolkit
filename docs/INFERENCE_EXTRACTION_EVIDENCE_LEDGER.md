@@ -18,8 +18,10 @@ validation config migration and live shared-predictor validation. E002-E006
 and E008 are retained only as compact supersession records because they do not
 represent accepted current designs. E016 retains the exploratory,
 pre-decomposition Cut 7 restoration evidence. E017 records the completed Cut
-7E verification of the finalized Cut 7A-7D architecture and awaits
-supervisory review.
+7E verification of the finalized Cut 7A-7D architecture. E018 records the
+pre-closure Cut 10A Desktop lifecycle, while E019 records the tightened Cut
+10A closure state under supervisory review. The official Cut 10B interface,
+Cut 11 T4 qualification, and Cut 12 platform/release gates remain open.
 
 ## Operating rule
 
@@ -2131,6 +2133,313 @@ probability executor, restoration/interpolation, output-space policy,
 threshold order, NIfTI writer, evaluation spatial tolerance, relevant
 MONAI/nibabel behavior, pinned checkpoint, or selected data invalidate the
 corresponding portion of E017 and require it to be rerun.
+
+---
+
+## Evidence item E018: Cut 10 Grand Challenge container lifecycle
+
+### Status and supersession
+
+| Field | Value |
+|---|---|
+| Evidence ID | `E018` |
+| Status | `PASS` for the pre-closure Cut 10A Desktop development lifecycle; superseded for final Cut 10A closure by E019 |
+| Base commit | `8d4f87851fd812ae43a5dac8392372544f64aab2` plus the uncommitted Cut 10 overlay |
+| Environment | Desktop WSL/Docker, NVIDIA GeForce RTX 4070 Ti SUPER, model FP32 |
+
+E018 supersedes the Cut 7 ledger's statement that Docker construction and Grand
+Challenge HTTP/socket I/O were untested. It does not supersede E017's scientific
+and spatial evidence, and it is not the Cut 11 AWS T4 resource certificate or
+the Cut 12 official-platform release certificate.
+
+### Question being answered
+
+E018 asks whether a model-independent Linux/amd64 image can initialize the
+separately mounted Cut 9 model artifact before readiness; dispatch arbitrary
+platform socket slugs through an explicit manifest; reuse registered label-free
+preprocessing and `src.inference`; restore one prediction to the native input
+grid; write and reopen the required binary NIfTI beneath `/output`; survive a
+fresh-container replay; fail health closed when model initialization fails; and
+save as an independently replaceable Docker archive without embedding weights.
+
+### Pinned code and image state
+
+The isolated Desktop worktree is:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut10_20260803a/
+```
+
+It is detached at Cut 9 commit
+`8d4f87851fd812ae43a5dac8392372544f64aab2` with the exact uncommitted Cut 10
+overlay under supervisory review. The image is built from the immutable base:
+
+```text
+pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime
+sha256:f894dae26e1ee8557c544f9cfdb9dc011b1552bf3c1e656b422f2e221d380e40
+```
+
+The resulting image is `medseg-diffusion-gc:cut10-dev`, image ID
+`sha256:aab9461440a7f00ed08a9ad557e6fd6cc18ac661b62eb7c6c1eb31607c351724`.
+Docker inspection proved `linux/amd64`, configured user
+`algorithm:algorithm`, and label
+`org.grand-challenge.api-method=invoke`. An independent filesystem audit found
+no `.pth`, `.pt`, or `.ckpt` under `/opt/app` and an empty `/opt/ml/model` in the
+image. The Dockerfile, pip lock, and fixture manifest SHA-256 values are:
+
+```text
+d46a66175b8ec15c5280223699b22a6ef72efa44e7757c0a245b1b95034c2512  Dockerfile
+60091acb5f6512a04b713d01f4170bf679fd1b3154a00e200766fbd9e420ba83  requirements.lock
+44d0c98774ead4f5d876a47d982fbf92077780b9fbf7d2461274c62b39bd2ffd  interface_manifest.fixture.yaml
+```
+
+The image import audit reported Python 3.11, PyTorch `2.6.0+cu126`, CUDA 12.6,
+MONAI 1.5.0, nibabel 5.3.2, NumPy 1.26.4, OmegaConf 2.3.0, SimpleITK 2.5.2,
+FastAPI 0.116.1, and Uvicorn 0.35.0. The base digest pins the preinstalled
+Python/PyTorch/CUDA layer; every additional pip-installed inference dependency
+is pinned in `requirements.lock`.
+
+### Pinned model/config/input state
+
+The test used the same p5n1 DynUNet checkpoint as E017:
+
+```text
+best_model_step_040000_dice_3d_0.5724.pth
+120c93ee6a32f79829bf8a6b2d3ab7db59861f865ad1e8a37889f87ab0c82441
+```
+
+The independently generated Cut 9 artifact was mounted read-only at
+`/opt/ml/model`. Its resolved model config and standalone inference-policy hashes
+were respectively
+`7152715bded1f11cc244a8a4270b6cc592b8a0e555f40d6d40af5b2924cc918a`
+and
+`74848c03ce60616a5a94541d5d53c04c1627bd4c933d494cf5dfea2e2f586520`.
+The model archive is:
+
+```text
+cut10_live_artifacts/fp32_model/pinned_p5n1_fp32.tar.gz
+d58b6e1a97e7b905cbccaf3c0ab302d609a029d8346d62565df9c511bf84cd51
+```
+
+The container proof deliberately used the supported native FP32 policy. It does
+not close deferred issue O004 concerning native FP16 sliding-window accumulation.
+
+The input was a generated, non-patient 3D NIfTI with shape `[48,56,64]`,
+anisotropic spacing `[1.5,1.2,2.0]`, ALS orientation, nontrivial permutation and
+translation, qform code 1, and sform code 2:
+
+```text
+cut10_live_artifacts/input/images/fixture-input/synthetic-t1.nii.gz
+1dc4ad45094f6fe4e9c5bb02d510cafddbf19a14551d9709b94e7b0a3b60cfd7
+```
+
+The fixture manifest intentionally uses opaque, noncanonical socket slugs and
+maps its image socket to repository raw key `T1`. These values are development
+fixtures, not claimed ISLES26 phase slugs.
+
+### Execution environment and lifecycle
+
+The production-equivalent smoke command ran the image with:
+
+- `--network none` and `--read-only`;
+- read-only `/input` and `/opt/ml/model` bind mounts;
+- writable `/output` and a bounded transient `/tmp` tmpfs;
+- 8 CPUs, 32 GB host-memory limit, 1 GB shared memory, and one GPU;
+- non-root UID verification before invoke.
+
+The runtime initialized the artifact, strict model loader, registered ISLES26
+adapter, unlabeled case producer, shared `ProbabilityPredictor`, and production
+`gc_submission` policy before `/health` returned HTTP 200. POST `/invoke`
+returned HTTP 201. A separate run with an empty model mount served `/health` as
+HTTP 503 and logged only the error type. Multiple fresh containers completed,
+showing that success did not depend on prior `/tmp` state.
+
+The final structured run reported 0.479 seconds for transport resolution,
+preprocessing, shared prediction, native restoration, and output writing, with
+peak allocated CUDA memory 1,990,069,760 bytes. These Desktop values are
+descriptive only. They do not establish T4 memory headroom or the ten-minute
+platform deadline.
+
+The reopened final output proved exact input shape, affine, qform, sform, and
+form-code equality; `uint8` dtype; and allowed-value subset `{0,1}`:
+
+```text
+cut10_live_artifacts/smoke_output_structured/images/fixture-output/output.nii.gz
+65a7334c1d3eab159b5164e08cf2a8e4b378f7ffea0b22a866279a2574f3033f
+```
+
+### Regression and archive results
+
+The focused Cut 10 interface/image/runtime/diagnostic/builder suite passed
+28/28 tests. The final dependency-wide matrix then passed 290/290 tests:
+
+```bash
+python -m unittest discover -s tests -p 'test_inference_*.py' -v       # 74
+python -m unittest discover -s tests -p 'test_evaluation_*.py' -v      # 149
+python -m unittest discover -s tests -p 'test_gc_*.py' -v              # 36
+python -m unittest \
+  tests.test_training_validation_inference \
+  tests.test_training_inference_config_migration \
+  tests.test_loader_stack_record_source \
+  tests.test_nnunet_volume_spatial_contract \
+  tests.test_nnunet_precursor_config \
+  tests.test_nnunet_converter_affine \
+  tests.test_nnunet_converter_roundtrip \
+  tests.test_model_loader -v                                           # 31
+```
+
+The combined relevant-regression log SHA-256 is
+`b712fc955f565902e881550fea396194bc364c62d99109af193b56daa0ea59f0`.
+Repository-wide `unittest` discovery additionally passed 519 tests and exposed
+one pre-existing collection error: `tests/test_summarize_threshold_calibration.py`
+imports absent `scripts.summarize_threshold_calibration`. Neither file is
+changed by Cut 10; the missing module already exists at the pinned Cut 9 base.
+The full-discovery log SHA-256 is
+`e492e185c4e2ea54ff5cd6d0d5d8daddd98995ddedc25f91021a94eca55c8ca1`.
+
+The saved image archive passed `gzip -t` and is:
+
+```text
+cut10_live_artifacts/image_export/medseg-diffusion-gc-cut10-dev.tar.gz
+d81ef1cb2066b7340bc9d75a700d8b6b460f3faec4a6f4907f6c886da0ae74ba
+approximately 3.2 GB
+```
+
+### Acceptance scope and invalidation
+
+E018 established the initial Cut 10A development boundary: the model and image
+are independently produced; no weights are embedded; the container has a pinned
+offline runtime; arbitrary socket slugs remain transport-only; preprocessing and
+prediction delegate to the shared repository path with labels disabled; native
+NIfTI output is reopened and spatially validated; invalid initialization prevents
+readiness; and the built image is saveable as a valid gzip stream.
+
+E018 does not certify the official ISLES26 interface reconciliation, a
+platform-hosted try-out, AWS g4dn.2xlarge/T4 resource behavior, the ten-minute
+deadline, native FP16 stability/parity, clean reload of both release archives,
+or final release documentation. Those remain Cut 10B, Cut 11, and Cut 12 gates.
+Changes to the Dockerfile/base
+digest, inference lock, interface manifest, artifact contents, model loader,
+dataset adapter, shared inference/restoration/writer path, HTTP lifecycle, or
+container build/test/save implementation invalidate the corresponding evidence.
+
+---
+
+## Evidence item E019: Cut 10A bounded closure
+
+### Status and supersession
+
+| Field | Value |
+|---|---|
+| Evidence ID | `E019` |
+| Status | `PASS` for bounded Cut 10A closure; pending supervisory review/commit |
+| Base commit | `8d4f87851fd812ae43a5dac8392372544f64aab2` plus the uncommitted final Cut 10A overlay |
+| Environment | Desktop WSL/Docker, NVIDIA GeForce RTX 4070 Ti SUPER, model FP32 |
+
+E019 retains E018's pinned model, synthetic input, base-image digest, dependency
+lock, and fixture manifest. It supersedes E018 only for the tightened Cut 10A
+runtime, diagnostic, image-audit, lifecycle-test, and documentation contracts.
+
+### Question being answered
+
+E019 asks whether the bounded Cut 10A implementation closes its remaining
+development-contract gaps without entering official-interface work: production
+must retain the artifact's native-output policy; the diagnostic runtime may
+explicitly recompose that policy for model-space inspection; diagnostics must
+never write to `/output` or a descendant; the versioned FastAPI application
+must be tested in its real image environment; image build and save must audit
+that no model payload is embedded; and the lifecycle tester must independently
+compare the sole NIfTI input and output geometries.
+
+### Pinned code and image state
+
+The isolated Desktop worktree is:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut10a_closure_20260803a/
+```
+
+It is detached at Cut 9 commit
+`8d4f87851fd812ae43a5dac8392372544f64aab2` with the exact uncommitted Cut 10A
+overlay under review. The rebuilt image is
+`medseg-diffusion-gc:cut10a-closure-dev`, image ID
+`sha256:455965c8f20a68c7c658d5d80447fe039a461f0e6cbe222c59a8e3dabd9bdcf2`.
+Its build report records `linux/amd64`, user `algorithm:algorithm`, API method
+`invoke`, `model_payload_audited: true`, and `model_embedded: false`:
+
+```text
+cut10a_live_artifacts/image_build/container_build_report.json
+ef2dd8747285c14a33b76dc5edad7e3f3bb96ea90000f585ba84f47687ed3c12
+```
+
+The audit executed against the built image with networking disabled and a
+read-only root filesystem. It required `/opt/ml/model` to contain no files and
+rejected checkpoint-like `.pth`, `.pt`, or `.ckpt` payloads beneath `/opt/app`
+or `/opt/ml/model`. The same audit ran again before image export.
+
+### Execution and results
+
+The complete Grand Challenge and shared-inference regression families ran in
+the desktop `MedSegDiff_env`: 117 tests completed with 114 passes and three
+expected skips because FastAPI is intentionally installed in the GC image, not
+the host research environment. Those three application tests were then mounted
+read-only into the rebuilt image with the platform-equivalent writable `/tmp`
+tmpfs and passed 3/3. They directly exercised successful readiness/invocation,
+failed initialization as HTTP 503, and inference failure as generic HTTP 500:
+
+```text
+cut10a_live_artifacts/app_test/test_gc_app.log
+faf56e1437d7400ebf4bda7385f70d40c5b0fa57edea634e605c95e687030a2d
+```
+
+The production `gc_submission` replay mounted the unchanged E018 model and
+input read-only, ran non-root with no network and a read-only root filesystem,
+returned HTTP 201, and independently reopened the sole input and output. Shape,
+affine, qform, sform, and form codes matched; the output remained binary
+`uint8`. Runtime provenance reported `policy_origin=artifact`, peak allocated
+CUDA memory `1,990,069,760` bytes, and 0.747 seconds for the synthetic
+invocation. The deterministic output hash remained identical to E018:
+
+```text
+cut10a_live_artifacts/smoke_output/images/fixture-output/output.nii.gz
+65a7334c1d3eab159b5164e08cf2a8e4b378f7ffea0b22a866279a2574f3033f
+```
+
+The diagnostic profile explicitly selected `model_preprocessed`, retained
+probability and mask arrays of shape `[1,1,67,72,127]`, recorded
+`inference_policy_origin=diagnostic_output_space_override`, and wrote only
+beneath `/diagnostic`. Unit contracts reject that override for production and
+reject both `/output` and every descendant as a diagnostic destination:
+
+```text
+cut10a_live_artifacts/diagnostic/diagnostic_report.json
+a73a12e1cc4af3579aa4910fe7ab15a2a425309359fd9353cf660e33c07b3c3c
+```
+
+The independently saved image passed `gzip -t`:
+
+```text
+cut10a_live_artifacts/image_export/medseg-diffusion-gc-cut10a-closure-dev.tar.gz
+7e0f237d39d3be0bf7e5a4f42bceb62653daf04ae14b3a12f6bf724898c722f5
+```
+
+### Acceptance scope and invalidation
+
+E019 closes the bounded Cut 10A development contract. It demonstrates a
+model-independent, audited, saveable NIfTI fixture image; artifact-owned
+production inference policy; explicit diagnostic-only output-space override;
+versioned HTTP application behavior inside the real image; and external
+single-input native-grid validation. It does not make the image an official
+ISLES26 submission.
+
+Cut 10B still owns the published ISLES26 socket manifest, ordered probability
+and segmentation outputs, compressed MHA conversion/validation, official
+technical JSON schema, external tester-sidecar HTTP lifecycle, and 300-second
+organizer-style invoke bound. Cut 11 owns T4 resource and ten-minute
+qualification. Cut 12 owns hosted-platform try-out and release closure. Changes
+to the audited image contents, runtime policy composition, diagnostic boundary,
+HTTP application, NIfTI lifecycle validation, image build/save implementation,
+or the pinned E018 model/input invalidate the corresponding portion of E019.
 
 ---
 

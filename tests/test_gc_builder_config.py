@@ -110,7 +110,7 @@ class TestGcBuilderConfig(unittest.TestCase):
             with self.assertRaisesRegex(BuilderConfigError, "inheritance cycle"):
                 compose_inference_policy_file(root / "a.yaml")
 
-    def test_build_model_and_build_all_dispatch_to_the_same_cut9_core(self):
+    def test_build_model_dispatches_to_cut9_core(self):
         result = SimpleNamespace(
             artifact_dir=Path("artifact"),
             archive_path=Path("model_directory.tar.gz"),
@@ -132,10 +132,50 @@ class TestGcBuilderConfig(unittest.TestCase):
         ) as build:
             load_config.return_value = object()
             self.assertEqual(main(["build-model", *common]), 0)
-            self.assertEqual(main(["build-all", *common]), 0)
 
-        self.assertEqual(load_config.call_count, 2)
-        self.assertEqual(build.call_count, 2)
+        self.assertEqual(load_config.call_count, 1)
+        self.assertEqual(build.call_count, 1)
+
+    def test_build_image_save_and_build_all_dispatch_separate_artifacts(self):
+        model_result = SimpleNamespace(
+            artifact_dir=Path("artifact"),
+            archive_path=Path("model.tar.gz"),
+            report_path=Path("model_build_report.json"),
+        )
+        image_result = SimpleNamespace(
+            inspection=SimpleNamespace(
+                image_reference="fixture:cut10",
+                image_id="sha256:image",
+            ),
+            report_path=Path("container_build_report.json"),
+        )
+        model_args = [
+            "--run-dir", "run", "--checkpoint", "best_model", "--output-dir", "out"
+        ]
+        with patch(
+            "scripts.gc_submission_builder.cli.load_model_artifact_build_config",
+            return_value=object(),
+        ), patch(
+            "scripts.gc_submission_builder.cli.build_model_artifact",
+            return_value=model_result,
+        ) as build_model, patch(
+            "scripts.gc_submission_builder.cli.load_container_build_config",
+            return_value=object(),
+        ) as load_container, patch(
+            "scripts.gc_submission_builder.cli.build_container_image",
+            return_value=image_result,
+        ) as build_image, patch(
+            "scripts.gc_submission_builder.cli.save_container_image",
+            return_value=Path("image.tar.gz"),
+        ) as save_image:
+            self.assertEqual(main(["build-image"]), 0)
+            self.assertEqual(main(["save"]), 0)
+            self.assertEqual(main(["build-all", *model_args]), 0)
+
+        self.assertEqual(build_model.call_count, 1)
+        self.assertEqual(load_container.call_count, 3)
+        self.assertEqual(build_image.call_count, 2)
+        self.assertEqual(save_image.call_count, 2)
 
 
 if __name__ == "__main__":
