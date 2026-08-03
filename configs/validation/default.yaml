@@ -1,6 +1,6 @@
 
 validation_interval: 5000  # Steps between validation runs
-val_batch_size: 16
+val_batch_size: 1
 multi_gpu_validation: false  # Enable multi-GPU validation sampling (requires multi_gpu training config)
 
 metrics:

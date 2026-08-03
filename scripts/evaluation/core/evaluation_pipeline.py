@@ -45,8 +45,13 @@ from scripts.evaluation.reporting.threshold_records import (
     write_oracle_threshold_csv,
     write_per_case_threshold_csv,
 )
-from src.data.loaders import get_dataloaders
-from src.inference.contracts import SpatialGeometry
+from src.data.loader_stack.record_source import load_case_records
+from src.inference.case_producer import build_case_producer
+from src.inference.contracts import LabeledPreprocessedCase, SpatialGeometry
+from src.inference.pipeline import (
+    ModelProbabilityExecutor,
+    build_model_probability_executor,
+)
 from src.inference.policy import InferencePolicy, resolve_inference_policy
 from src.inference.runtime import (
     AssessmentContext,
@@ -106,6 +111,7 @@ def build_model_evaluation_request(cfg: DictConfig) -> ModelEvaluationRequest:
         primary_level=str(threshold_protocol.primary.level),
     )
     validate_model_evaluation_mode(cfg)
+    _validate_complete_case_batch(cfg)
     resolved_inference = resolve_inference_policy(cfg)
     runtime = parse_inference_runtime(
         OmegaConf.select(cfg, "inference_runtime", default={})
@@ -157,15 +163,26 @@ def run_model_evaluation(cfg: DictConfig) -> Dict[str, Any]:
         checkpoint_path=request.checkpoint_path,
         device=request.device,
     )
-    dataloaders = get_dataloaders(cfg, load_labels=True)
-    if "val" not in dataloaders:
+    model.eval()
+    executor = build_model_probability_executor(backend=model, cfg=cfg)
+    case_records = load_case_records(cfg, subset_role="val", load_labels=True)
+    dataset_id = str(OmegaConf.select(cfg, "dataset.id", default="") or "").strip()
+    if not dataset_id:
         raise ValueError(
-            "get_dataloaders(cfg, load_labels=True) did not return a 'val' dataloader."
+            "Repository-model evaluation requires dataset.id so normalized records "
+            "can enter the registered preprocessing adapter."
         )
+    case_producer = build_case_producer(
+        dataset_id=dataset_id,
+        dataset_cfg=cfg.dataset,
+        load_labels=True,
+    )
+    labeled_cases = (case_producer(record) for record in case_records)
 
     evaluation_result = evaluate_model_volumes(
-        model=model,
-        dataloader=dataloaders["val"],
+        executor=executor,
+        cases=labeled_cases,
+        total_cases=len(case_records),
         cfg=cfg,
         request=request,
     )
@@ -178,8 +195,9 @@ def run_model_evaluation(cfg: DictConfig) -> Dict[str, Any]:
 
 
 def evaluate_model_volumes(
-    model: Any,
-    dataloader: Iterable[Any],
+    executor: ModelProbabilityExecutor,
+    cases: Iterable[LabeledPreprocessedCase],
+    total_cases: Optional[int],
     cfg: DictConfig,
     request: ModelEvaluationRequest,
 ) -> Dict[str, Any]:
@@ -192,11 +210,13 @@ def evaluate_model_volumes(
     sample_count = 0
 
     for sample in iter_model_volume_samples(
-        model=model,
-        dataloader=dataloader,
-        cfg=cfg,
+        executor=executor,
+        cases=cases,
         device=request.device,
+        loader_mode=request.loader_mode,
+        subset=OmegaConf.select(cfg, "dataset.active_subsets.val", default=None),
         show_progress=bool(OmegaConf.select(cfg, "evaluation.show_progress", default=True)),
+        total_cases=total_cases,
     ):
         sample_count += 1
         spatial_samples.append(_spatial_sample_record(sample))
@@ -712,6 +732,26 @@ def _mapping_or_empty(value: object) -> Mapping[str, object]:
     if isinstance(value, Mapping):
         return value
     return {}
+
+
+def _validate_complete_case_batch(cfg: DictConfig) -> None:
+    value = OmegaConf.select(cfg, "validation.val_batch_size", default=None)
+    try:
+        batch_size = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(_complete_case_batch_error()) from exc
+    if isinstance(value, bool) or batch_size != 1:
+        raise ValueError(_complete_case_batch_error())
+
+
+def _complete_case_batch_error() -> str:
+    return (
+        "Geometry-aware repository-model 3D evaluation requires "
+        "validation.val_batch_size=1 so it processes one complete case at a time. "
+        "A job may still process many cases sequentially; "
+        "inference.sliding_window.sw_batch_size independently controls windows "
+        "within the current case."
+    )
 
 
 def _normalize_dim_token(value: object) -> str:

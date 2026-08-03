@@ -226,6 +226,16 @@ class PreprocessedCaseProducer:
                 case_id=case_id,
                 raw_modalities=raw_modalities,
                 label_path=label_path,
+                record_metadata={
+                    str(key): value
+                    for key, value in record.items()
+                    if key
+                    not in {
+                        "caseID",
+                        "label",
+                        *self.required_raw_keys,
+                    }
+                },
             )
         except (InferenceInputError, SpatialRestorationError) as exc:
             raise type(exc)(
@@ -241,6 +251,7 @@ class PreprocessedCaseProducer:
         case_id: str,
         raw_modalities: Mapping[str, Any],
         label_path: Any,
+        record_metadata: Mapping[str, Any],
     ) -> PreprocessedCase | LabeledPreprocessedCase:
         case_input: dict[str, str] = {}
         native_metadata: dict[str, NativeImageMetadata] = {}
@@ -321,6 +332,7 @@ class PreprocessedCaseProducer:
             metadata={
                 "dataset_id": self.adapter.dataset_id,
                 "processed_modalities": self.modalities,
+                "record_metadata": dict(record_metadata),
             },
         )
         if not self.load_labels:

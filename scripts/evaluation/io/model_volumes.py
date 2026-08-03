@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import replace
-from typing import Any, Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Optional
 
-import nibabel as nib
-import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
@@ -15,23 +14,12 @@ from tqdm import tqdm
 
 from scripts.evaluation.core.contracts import VolumeSample
 from scripts.evaluation.core.model_loader import is_discriminative_config, resolve_diffusion_type
-from src.data.loader_stack.preprocessing import get_preprocessing_adapter
-from src.inference.contracts import LabeledPreprocessedCase, SpatialGeometry
-from src.inference.pipeline import (
-    build_model_probability_executor,
-    predict_preprocessed_case,
-)
-from src.inference.preprocessing import preprocess_case
-from src.utils.loader_utils import LoaderDataUtils
-
-
-BatchType = Any
+from src.inference.contracts import LabeledPreprocessedCase
+from src.inference.pipeline import ModelProbabilityExecutor, predict_preprocessed_case
 
 
 def validate_model_evaluation_mode(cfg: DictConfig) -> None:
-    """
-    Validate whether the current config can be evaluated by live model IO.
-    """
+    """Validate whether the current config can be evaluated by live model IO."""
     data_dim = _normalize_dim_token(OmegaConf.select(cfg, "data_mode.dim", default=None))
     diffusion_type = resolve_diffusion_type(cfg)
 
@@ -58,397 +46,127 @@ def validate_model_evaluation_mode(cfg: DictConfig) -> None:
 
 
 def iter_model_volume_samples(
-    model: Any,
-    dataloader: Iterable[BatchType],
-    cfg: DictConfig,
+    *,
+    executor: ModelProbabilityExecutor,
+    cases: Iterable[LabeledPreprocessedCase],
     device: str | torch.device,
+    loader_mode: str = "",
+    subset: object = None,
     show_progress: bool = True,
     max_samples: Optional[int] = None,
+    total_cases: Optional[int] = None,
 ) -> Iterator[VolumeSample]:
-    """
-    Yield 3D ``VolumeSample`` objects from a live repository model.
-    """
-    validate_model_evaluation_mode(cfg)
-    data_dim = _normalize_dim_token(OmegaConf.select(cfg, "data_mode.dim", default=None))
-    if data_dim != "3d":
-        raise ValueError("iter_model_volume_samples requires data_mode.dim='3d'.")
+    """Yield one spatially declared sample per typed preprocessed case."""
     if max_samples is not None and max_samples <= 0:
         raise ValueError("max_samples must be > 0 when provided.")
 
     resolved_device = torch.device(device)
-    inferer = build_model_probability_executor(backend=model, cfg=cfg)
-    loader_mode = str(OmegaConf.select(cfg, "data_mode.loader_mode", default="") or "")
-    subset = OmegaConf.select(cfg, "dataset.active_subsets.val", default=None)
-    policy = inferer.policy
-    policy_source = str(inferer.policy_source)
+    selected_total = total_cases
+    if max_samples is not None and selected_total is not None:
+        selected_total = min(selected_total, max_samples)
+    case_iterable = _wrap_with_progress(cases, selected_total, show_progress)
 
-    yielded = 0
-    model.eval()
-    if policy.output_space == "native_input":
-        yield from _iter_native_model_volume_samples(
-            inferer=inferer,
-            dataloader=dataloader,
-            cfg=cfg,
-            device=resolved_device,
-            show_progress=show_progress,
-            max_samples=max_samples,
-            loader_mode=loader_mode,
-            subset=subset,
-            policy_source=policy_source,
+    for case_index, labeled in enumerate(case_iterable):
+        if max_samples is not None and case_index >= max_samples:
+            return
+        if not isinstance(labeled, LabeledPreprocessedCase):
+            raise TypeError(
+                "Repository-model volume evaluation requires each producer value to be "
+                "LabeledPreprocessedCase."
+            )
+        if int(labeled.case.image.shape[0]) != 1:
+            raise ValueError(
+                "Repository-model full-volume evaluation processes one complete case at "
+                "a time. A job may process many cases sequentially; "
+                "inference.sliding_window.sw_batch_size independently controls windows "
+                "within the current case."
+            )
+
+        device_case = replace(
+            labeled.case,
+            image=labeled.case.image.to(resolved_device),
         )
-        return
-
-    total_batches = _safe_len(dataloader)
-    batch_iterable = _wrap_with_progress(dataloader, total_batches, show_progress)
-    with torch.no_grad():
-        for batch_index, batch in enumerate(batch_iterable):
-            image, label, sample_ids, metas = _unpack_batch(batch)
-            input_geometries = _resolve_batch_geometries(image, "image")
-            label_geometries = _resolve_batch_geometries(label, "label")
-            image = image.to(resolved_device)
-            prediction = inferer(
-                image,
-                progress_label=_resolve_batch_label(sample_ids, batch_index),
-                show_window_progress=show_progress,
-            )
-            probabilities = prediction.detach().cpu()
-            labels = label.detach().float().cpu()
-
-            batch_size = int(probabilities.shape[0])
-            if labels.shape[0] != batch_size:
-                raise ValueError(
-                    "Prediction and label batch size mismatch: "
-                    f"pred={tuple(probabilities.shape)}, label={tuple(labels.shape)}."
-                )
-
-            for item_index in range(batch_size):
-                if max_samples is not None and yielded >= max_samples:
-                    return
-
-                case_id = resolve_batch_item_identity(
-                    sample_ids=sample_ids,
-                    batch_index=batch_index,
-                    item_index=item_index,
-                )
-                pred_volume = _ensure_channel_first_volume(probabilities[item_index])
-                gt_volume = _ensure_channel_first_volume(labels[item_index])
-                metadata = {
-                    "source": "live_model_volume",
-                    "batch_index": int(batch_index),
-                    "item_index": int(item_index),
-                    "loader_mode": loader_mode,
-                    "inference_policy_source": policy_source,
-                    "output_space": policy.output_space,
-                    "precision": policy.precision,
-                    "shape": tuple(int(dim) for dim in pred_volume.shape),
-                    "reference_spacing_xyz": list(label_geometries[item_index].spacing),
-                }
-                if subset is not None:
-                    metadata["subset"] = str(subset)
-                metadata.update(_resolve_item_meta(metas, item_index))
-
-                sample = VolumeSample(
-                    case_id=case_id,
-                    volume_id=case_id,
-                    prediction_volume=pred_volume,
-                    ground_truth_volume=gt_volume,
-                    prediction_space=policy.output_space,
-                    reference_space=policy.output_space,
-                    prediction_geometry=input_geometries[item_index],
-                    reference_geometry=label_geometries[item_index],
-                    metadata=metadata,
-                )
-                sample.validate()
-                yield sample
-                yielded += 1
-
-
-def _iter_native_model_volume_samples(
-    *,
-    inferer: Any,
-    dataloader: Iterable[BatchType],
-    cfg: DictConfig,
-    device: torch.device,
-    show_progress: bool,
-    max_samples: Optional[int],
-    loader_mode: str,
-    subset: object,
-    policy_source: str,
-) -> Iterator[VolumeSample]:
-    configured_batch_size = int(
-        OmegaConf.select(cfg, "validation.val_batch_size", default=1) or 1
-    )
-    if configured_batch_size != 1:
-        raise ValueError(
-            "Native-space repository-model evaluation processes one case-specific "
-            "spatial trace at a time and requires validation.val_batch_size=1."
+        prediction = predict_preprocessed_case(
+            executor,
+            device_case,
+            progress_label=labeled.case_id,
+            show_window_progress=show_progress,
         )
-
-    records = _resolve_dataset_records(dataloader)
-    dataset_id = str(OmegaConf.select(cfg, "dataset.id", default="") or "").strip()
-    if not dataset_id:
-        raise ValueError("Native-space evaluation requires dataset.id.")
-    adapter = get_preprocessing_adapter(dataset_id)
-    modalities = OmegaConf.select(cfg, "dataset.modalities", default=None)
-    required_keys = adapter.resolve_required_raw_modalities(modalities)
-    dataset_cfg = OmegaConf.to_container(cfg.dataset, resolve=True)
-    if not isinstance(dataset_cfg, Mapping):
-        raise ValueError("Native-space evaluation requires dataset configuration mapping.")
-
-    selected_records = records
-    if max_samples is not None:
-        selected_records = records[:max_samples]
-    record_iterable: Iterable[Mapping[str, Any]] = selected_records
-    if show_progress:
-        record_iterable = tqdm(
-            selected_records,
-            total=len(selected_records),
-            desc="Evaluating native validation volumes",
-            leave=True,
-        )
-
-    with torch.no_grad():
-        for record in record_iterable:
-            case_id = str(record.get("caseID", "")).strip()
-            if not case_id:
-                raise ValueError(
-                    "Native-space evaluation dataset record is missing caseID."
-                )
-            case_input = LoaderDataUtils.resolve_case_input_paths(
-                filedict=record,
-                base_modalities=required_keys,
-                include_label=True,
-            )
-            missing = [key for key in (*required_keys, "label") if key not in case_input]
-            if missing:
-                raise ValueError(
-                    f"Native-space evaluation record {case_id!r} is missing paths "
-                    f"for {missing}."
-                )
-            preprocessed = preprocess_case(
-                dataset_id=dataset_id,
-                case_id=case_id,
-                raw_modalities={key: case_input[key] for key in required_keys},
-                dataset_cfg=dataset_cfg,
-                label_path=case_input["label"],
-                load_labels=True,
-            )
-            if not isinstance(preprocessed, LabeledPreprocessedCase):
-                raise ValueError(
-                    "Native-space evaluation requires labeled preprocessing to return "
-                    "LabeledPreprocessedCase."
-                )
-            device_case = replace(
-                preprocessed.case,
-                image=preprocessed.case.image.to(device),
-            )
-            prediction = predict_preprocessed_case(
-                inferer,
-                device_case,
-                progress_label=case_id,
-                show_window_progress=show_progress,
-            )
-            pred_volume = _ensure_channel_first_volume(prediction.probability[0])
-            gt_volume = _ensure_channel_first_volume(preprocessed.native_label[0])
-            metadata = {
-                "source": "live_model_volume",
-                "loader_mode": loader_mode,
-                "inference_policy_source": policy_source,
-                "output_space": "native_input",
-                "precision": inferer.policy.precision,
-                "shape": tuple(int(dim) for dim in pred_volume.shape),
-                "reference_spacing_xyz": list(
-                    preprocessed.native_label_metadata.spacing
-                ),
-                "spatial_restoration_applied": bool(
-                    prediction.provenance["spatial_restoration"]["applied"]
-                ),
-            }
-            if subset is not None:
-                metadata["subset"] = str(subset)
-            for key in ("siteID", "site_id", "metadata"):
-                if key in record:
-                    metadata[key] = _metadata_value_to_python(record[key])
-
-            sample = VolumeSample(
-                case_id=case_id,
-                volume_id=case_id,
-                prediction_volume=pred_volume,
-                ground_truth_volume=gt_volume,
-                prediction_space="native_input",
-                reference_space="native_input",
-                prediction_geometry=prediction.spatial_trace.original,
-                reference_geometry=preprocessed.native_label_metadata.geometry,
-                metadata=metadata,
-            )
-            sample.validate()
-            yield sample
-
-
-def _resolve_dataset_records(
-    dataloader: Iterable[BatchType],
-) -> list[Mapping[str, Any]]:
-    dataset = getattr(dataloader, "dataset", None)
-    if dataset is None:
-        raise ValueError(
-            "Native-space evaluation requires a dataloader with an inspectable dataset "
-            "so raw case paths can enter label-aware shared preprocessing."
-        )
-
-    indices = None
-    while hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
-        parent = dataset.dataset
-        current_indices = [int(value) for value in dataset.indices]
-        if indices is None:
-            indices = current_indices
+        if prediction.output_space == "model_preprocessed":
+            reference = labeled.model_label
+            reference_geometry = labeled.model_label_geometry
+            prediction_geometry = prediction.spatial_trace.model
         else:
-            indices = [current_indices[index] for index in indices]
-        dataset = parent
+            reference = labeled.native_label
+            reference_geometry = labeled.native_label_geometry
+            prediction_geometry = prediction.spatial_trace.original
 
-    database = getattr(dataset, "database", None)
-    if not isinstance(database, Sequence):
-        raise ValueError(
-            "Native-space evaluation requires the validation dataset to expose its "
-            "normalized case records through dataset.database."
+        pred_volume = _ensure_channel_first_volume(prediction.probability[0])
+        gt_volume = _ensure_channel_first_volume(reference[0])
+        metadata = _case_provenance(labeled.case.metadata)
+        metadata.update({
+            "source": "live_model_volume",
+            "case_index": int(case_index),
+            "loader_mode": str(loader_mode),
+            "inference_policy_source": str(executor.policy_source),
+            "output_space": prediction.output_space,
+            "precision": executor.policy.precision,
+            "shape": tuple(int(dim) for dim in pred_volume.shape),
+            "reference_spacing_xyz": list(reference_geometry.spacing),
+            "spatial_restoration_applied": _restoration_was_applied(
+                prediction.provenance
+            ),
+        })
+        if subset is not None:
+            metadata["subset"] = str(subset)
+
+        sample = VolumeSample(
+            case_id=labeled.case_id,
+            volume_id=labeled.case_id,
+            prediction_volume=pred_volume,
+            ground_truth_volume=gt_volume,
+            prediction_space=prediction.output_space,
+            reference_space=prediction.output_space,
+            prediction_geometry=prediction_geometry,
+            reference_geometry=reference_geometry,
+            metadata=metadata,
         )
-    records = list(database)
-    if indices is not None:
-        records = [records[index] for index in indices]
-    if any(not isinstance(record, Mapping) for record in records):
-        raise ValueError(
-            "Native-space evaluation dataset.database must contain mapping records."
+        sample.validate()
+        yield sample
+
+
+def _case_provenance(metadata: Mapping[str, Any]) -> dict[str, object]:
+    provenance: dict[str, object] = {}
+    record_metadata = metadata.get("record_metadata", {})
+    if isinstance(record_metadata, Mapping):
+        provenance.update(
+            {
+                str(key): _metadata_value_to_python(value)
+                for key, value in record_metadata.items()
+            }
         )
-    return records
+    for key in ("dataset_id", "processed_modalities"):
+        if key in metadata:
+            provenance[key] = _metadata_value_to_python(metadata[key])
+    return provenance
 
 
-def resolve_batch_item_identity(
-    sample_ids: object,
-    batch_index: int,
-    item_index: int,
-) -> str:
-    """
-    Resolve a stable case ID for one item in a collated batch.
-    """
-    value = _index_collated_value(sample_ids, item_index)
-    if value is not None:
-        if isinstance(value, bytes):
-            value = value.decode("utf-8")
-        if torch.is_tensor(value):
-            if value.ndim == 0:
-                value = value.item()
-            else:
-                value = value.detach().cpu().tolist()
-        text = str(value).strip()
-        if text:
-            return text
-    return f"batch{batch_index}_item{item_index}"
-
-
-def _unpack_batch(
-    batch: BatchType,
-) -> Tuple[Tensor, Tensor, Optional[object], Optional[object]]:
-    if not isinstance(batch, (tuple, list)) or len(batch) < 2:
-        raise ValueError("Batch must be tuple/list like (image, label, [case_id], [metadata]).")
-    image = batch[0]
-    label = batch[1]
-    sample_ids = batch[2] if len(batch) > 2 else None
-    metas = batch[3] if len(batch) > 3 else None
-    if not torch.is_tensor(image) or not torch.is_tensor(label):
-        raise ValueError("Batch image and label must be tensors.")
-    return image, label, sample_ids, metas
+def _restoration_was_applied(provenance: Mapping[str, Any]) -> bool:
+    restoration = provenance.get("spatial_restoration", {})
+    if not isinstance(restoration, Mapping):
+        return False
+    return bool(restoration.get("applied", False))
 
 
 def _ensure_channel_first_volume(volume: Tensor) -> Tensor:
     if volume.ndim == 4:
-        return volume.detach().cpu()
+        return volume.detach().float().cpu()
     if volume.ndim == 3:
-        return volume.detach().cpu().unsqueeze(0)
+        return volume.detach().float().cpu().unsqueeze(0)
     raise ValueError(
         "Expected item volume tensor to be 3D [H,W,D] or 4D [C,H,W,D], "
         f"got shape={tuple(volume.shape)}."
     )
-
-
-def _resolve_batch_label(sample_ids: object, batch_index: int) -> str:
-    first_id = resolve_batch_item_identity(sample_ids, batch_index=batch_index, item_index=0)
-    return first_id
-
-
-def _resolve_item_meta(metas: object, item_index: int) -> Dict[str, object]:
-    if metas is None:
-        return {}
-    if isinstance(metas, Mapping):
-        item_meta: Dict[str, object] = {}
-        for key, value in metas.items():
-            item_value = _index_collated_value(value, item_index)
-            if item_value is not None:
-                item_meta[str(key)] = _metadata_value_to_python(item_value)
-        return item_meta
-    item_value = _index_collated_value(metas, item_index)
-    if isinstance(item_value, Mapping):
-        return {str(key): _metadata_value_to_python(value) for key, value in item_value.items()}
-    return {}
-
-
-def _resolve_batch_geometries(tensor: Tensor, field_name: str) -> Tuple[SpatialGeometry, ...]:
-    if tensor.ndim != 5:
-        raise ValueError(
-            f"Repository-model {field_name} batch must use [B,C,H,W,D], "
-            f"got shape={tuple(tensor.shape)}."
-        )
-    raw_affine = getattr(tensor, "affine", None)
-    if raw_affine is None:
-        raise ValueError(
-            f"Repository-model {field_name} batch has no MONAI affine metadata. "
-            "Geometry-aware evaluation requires preprocessing to preserve each "
-            "case's transformed-grid affine."
-        )
-    affine_batch = np.asarray(
-        torch.as_tensor(raw_affine).detach().cpu(),
-        dtype=np.float64,
-    )
-    batch_size = int(tensor.shape[0])
-    if affine_batch.shape == (4, 4):
-        if batch_size != 1:
-            raise ValueError(
-                f"Repository-model {field_name} batch contains {batch_size} cases but "
-                "only one affine. Per-case geometry is required."
-            )
-        affine_batch = affine_batch[None, ...]
-    if affine_batch.shape != (batch_size, 4, 4):
-        raise ValueError(
-            f"Repository-model {field_name} affine metadata must have shape [B,4,4], "
-            f"got {tuple(affine_batch.shape)} for batch size {batch_size}."
-        )
-
-    spatial_shape = tuple(int(value) for value in tensor.shape[-3:])
-    return tuple(
-        SpatialGeometry(
-            shape=spatial_shape,
-            affine=tuple(tuple(float(value) for value in row) for row in affine),
-            spacing=tuple(float(value) for value in nib.affines.voxel_sizes(affine)),
-            orientation="".join(str(code) for code in nib.aff2axcodes(affine)),
-        )
-        for affine in affine_batch
-    )
-
-
-def _index_collated_value(value: object, item_index: int) -> Optional[object]:
-    if value is None:
-        return None
-    if isinstance(value, (str, bytes)):
-        return value if item_index == 0 else None
-    if torch.is_tensor(value):
-        if value.ndim == 0:
-            return value
-        if item_index < int(value.shape[0]):
-            return value[item_index]
-        return None
-    if isinstance(value, Sequence):
-        if item_index < len(value):
-            return value[item_index]
-        return None
-    return value if item_index == 0 else None
 
 
 def _metadata_value_to_python(value: object) -> object:
@@ -458,6 +176,17 @@ def _metadata_value_to_python(value: object) -> object:
         return value.detach().cpu().tolist()
     if isinstance(value, bytes):
         return value.decode("utf-8")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return [_metadata_value_to_python(item) for item in value]
+    if isinstance(value, list):
+        return [_metadata_value_to_python(item) for item in value]
+    if isinstance(value, Mapping):
+        return {
+            str(key): _metadata_value_to_python(item)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -472,23 +201,19 @@ def _normalize_dim_token(value: object) -> str:
     return token
 
 
-def _safe_len(iterable: Iterable[Any]) -> Optional[int]:
-    try:
-        return len(iterable)  # type: ignore[arg-type]
-    except (TypeError, AttributeError):
-        return None
-
-
 def _wrap_with_progress(
-    dataloader: Iterable[BatchType],
-    total_batches: Optional[int],
+    cases: Iterable[LabeledPreprocessedCase],
+    total_cases: Optional[int],
     show_progress: bool,
-) -> Iterable[BatchType]:
+) -> Iterable[LabeledPreprocessedCase]:
     if not show_progress:
-        return dataloader
+        return cases
     return tqdm(
-        dataloader,
-        total=total_batches,
+        cases,
+        total=total_cases,
         desc="Evaluating validation volumes",
         leave=True,
     )
+
+
+__all__ = ["iter_model_volume_samples", "validate_model_evaluation_mode"]

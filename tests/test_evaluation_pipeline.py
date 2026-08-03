@@ -7,7 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
@@ -76,6 +76,8 @@ def _make_cfg(tmp: str, mode: str = "fixed"):
                 "out_channels": 1,
             },
             "dataset": {
+                "id": "isles26",
+                "modalities": ["T1_RAW"],
                 "active_subsets": {"val": "val_fast"},
                 "preprocessing_configs": {
                     "roi": {
@@ -114,7 +116,10 @@ def _make_cfg(tmp: str, mode: str = "fixed"):
                     "allow_intermediate_artifacts": True,
                 },
             },
-            "validation": {"inference": {"mode": "direct"}},
+            "validation": {
+                "val_batch_size": 1,
+                "inference": {"mode": "direct"},
+            },
         }
     )
 
@@ -208,6 +213,35 @@ class TestEvaluationPipeline(unittest.TestCase):
 
         self.assertEqual(request.inference_policy.output_space, "native_input")
         self.assertEqual(request.inference_runtime.profile, "native")
+
+    def test_complete_case_batch_must_be_one_for_both_output_spaces(self):
+        for output_space in ("model_preprocessed", "native_input"):
+            with self.subTest(output_space=output_space), tempfile.TemporaryDirectory() as tmp:
+                cfg = _make_cfg(tmp, mode="fixed")
+                cfg.inference.output_space = output_space
+                cfg.validation.val_batch_size = 2
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "one complete case at a time.*many cases sequentially.*sw_batch_size",
+                ):
+                    build_model_evaluation_request(cfg)
+
+    def test_sliding_window_batch_is_independent_of_complete_case_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _make_cfg(tmp, mode="fixed")
+            cfg.validation.val_batch_size = 1
+            cfg.inference.sliding_window.sw_batch_size = 3
+
+            request = build_model_evaluation_request(cfg)
+
+        self.assertEqual(request.inference_policy.sliding_window.sw_batch_size, 3)
+
+    def test_default_validation_config_uses_complete_case_batch_one(self):
+        config_path = Path(__file__).parents[1] / "configs" / "validation" / "default.yaml"
+        validation_cfg = OmegaConf.load(config_path)
+
+        self.assertEqual(validation_cfg.val_batch_size, 1)
 
     def test_submission_runtime_rejects_labeled_evaluation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -432,21 +466,46 @@ class TestEvaluationPipeline(unittest.TestCase):
         self.assertEqual(payload["threshold_analysis"]["oracle_per_case"]["case_count"], 1)
 
     def _run_mocked_pipeline(self, cfg):
+        producer = Mock(name="labeled_case_producer")
+        records = [{"caseID": "case_a"}]
+        typed_case = object()
+        producer.return_value = typed_case
+
+        def iter_typed_cases(**kwargs):
+            self.assertEqual(list(kwargs["cases"]), [typed_case])
+            return iter([_volume_sample()])
+
         with patch(
             "scripts.evaluation.core.evaluation_pipeline.build_model_for_evaluation",
             return_value=DummyModel(),
         ), patch(
-            "scripts.evaluation.core.evaluation_pipeline.get_dataloaders",
-            return_value={"val": ["unused"]},
-        ) as get_dataloaders_mock, patch(
+            "scripts.evaluation.core.evaluation_pipeline.build_model_probability_executor",
+            return_value=Mock(name="executor"),
+        ) as executor_mock, patch(
+            "scripts.evaluation.core.evaluation_pipeline.load_case_records",
+            return_value=records,
+        ) as records_mock, patch(
+            "scripts.evaluation.core.evaluation_pipeline.build_case_producer",
+            return_value=producer,
+        ) as producer_mock, patch(
             "scripts.evaluation.core.evaluation_pipeline.iter_model_volume_samples",
-            return_value=iter([_volume_sample()]),
-        ), patch(
+            side_effect=iter_typed_cases,
+        ) as volume_samples_mock, patch(
             "scripts.evaluation.core.evaluation_pipeline.compute_metrics_3d_at_threshold",
             side_effect=_mock_metric_values,
         ):
             result = run_model_evaluation(cfg)
-        get_dataloaders_mock.assert_called_once_with(cfg, load_labels=True)
+        records_mock.assert_called_once_with(cfg, subset_role="val", load_labels=True)
+        producer_mock.assert_called_once_with(
+            dataset_id="isles26",
+            dataset_cfg=cfg.dataset,
+            load_labels=True,
+        )
+        executor_mock.assert_called_once()
+        call_kwargs = volume_samples_mock.call_args.kwargs
+        self.assertNotIn("dataloader", call_kwargs)
+        self.assertEqual(call_kwargs["total_cases"], 1)
+        producer.assert_called_once_with(records[0])
         return result
 
 if __name__ == "__main__":

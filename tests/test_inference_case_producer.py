@@ -222,6 +222,27 @@ class TestPreprocessedCaseProducer(unittest.TestCase):
             self.assertIsInstance(labeled, LabeledPreprocessedCase)
             torch.testing.assert_close(unlabeled.image, labeled.case.image)
 
+    def test_normalized_record_metadata_survives_the_typed_case_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record = _write_case(
+                Path(tmp),
+                "metadata-case",
+                shape=(4, 5, 3),
+                affine=np.eye(4),
+            )
+            record.update({"siteID": "site-a", "fold": 2})
+
+            labeled = build_case_producer(
+                dataset_id="isles26",
+                dataset_cfg=_dataset_cfg(),
+                load_labels=True,
+            )(record)
+
+        self.assertEqual(
+            labeled.case.metadata["record_metadata"],
+            {"split": "val", "siteID": "site-a", "fold": 2},
+        )
+
     def test_producer_matches_established_dataset_model_tensor_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
