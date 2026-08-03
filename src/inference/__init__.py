@@ -19,6 +19,10 @@ from src.inference.contracts import (
     TimingResourceRecord,
     UnsupportedModelError,
 )
+from src.inference.case_producer import (
+    PreprocessedCaseProducer,
+    build_case_producer,
+)
 from src.inference.preprocessing import preprocess_case
 from src.inference.output import write_native_prediction_mask
 from src.inference.pipeline import (
@@ -60,6 +64,7 @@ __all__ = [
     "PredictionResult",
     "PredictorCapabilities",
     "PreprocessedCase",
+    "PreprocessedCaseProducer",
     "ProbabilityPredictor",
     "ResolvedInferencePolicy",
     "ResourceLimitError",
@@ -70,6 +75,7 @@ __all__ = [
     "UnsupportedModelError",
     "ValidatedInferenceRequest",
     "build_model_probability_executor",
+    "build_case_producer",
     "predict_preprocessed_case",
     "parse_inference_policy",
     "parse_inference_runtime",

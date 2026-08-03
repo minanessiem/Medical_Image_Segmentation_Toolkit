@@ -48,6 +48,34 @@ class ResourceLimitError(InferenceError):
 Affine = Tuple[Tuple[float, float, float, float], ...]
 
 
+def _spatial_geometries_match(
+    first: "SpatialGeometry",
+    second: "SpatialGeometry",
+    *,
+    tolerance: float = 1.0e-5,
+) -> bool:
+    if first.shape != second.shape or first.orientation != second.orientation:
+        return False
+    first_affine = torch.tensor(first.affine, dtype=torch.float64)
+    second_affine = torch.tensor(second.affine, dtype=torch.float64)
+    first_spacing = torch.tensor(first.spacing, dtype=torch.float64)
+    second_spacing = torch.tensor(second.spacing, dtype=torch.float64)
+    return bool(
+        torch.allclose(
+            first_affine,
+            second_affine,
+            rtol=tolerance,
+            atol=tolerance,
+        )
+        and torch.allclose(
+            first_spacing,
+            second_spacing,
+            rtol=tolerance,
+            atol=tolerance,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class PredictorCapabilities:
     """Capabilities declared by a tensor-level probability predictor."""
@@ -318,6 +346,7 @@ class LabeledPreprocessedCase:
 
     case: PreprocessedCase
     model_label: torch.Tensor
+    model_label_geometry: SpatialGeometry
     native_label: torch.Tensor
     native_label_metadata: NativeImageMetadata
 
@@ -344,21 +373,67 @@ class LabeledPreprocessedCase:
             self.model_label.shape[0] != self.case.image.shape[0]
             or tuple(self.model_label.shape[2:]) != tuple(self.case.image.shape[2:])
         ):
-            raise InferenceInputError(
+            raise SpatialRestorationError(
                 "LabeledPreprocessedCase.model_label must match the preprocessed image "
                 "batch and spatial shape."
             )
+        if not isinstance(self.model_label_geometry, SpatialGeometry):
+            raise InferenceInputError(
+                "LabeledPreprocessedCase.model_label_geometry must be SpatialGeometry."
+            )
+        if not _spatial_geometries_match(
+            self.model_label_geometry,
+            self.case.spatial_trace.model,
+        ):
+            raise SpatialRestorationError(
+                "LabeledPreprocessedCase model label and image must occupy the same "
+                "model-space physical grid."
+            )
+        model_label_affine = getattr(self.model_label, "affine", None)
+        if model_label_affine is not None:
+            observed_affine = torch.as_tensor(model_label_affine).detach().cpu()
+            expected_affine = torch.tensor(
+                self.model_label_geometry.affine,
+                dtype=observed_affine.dtype,
+            )
+            if observed_affine.shape != (4, 4) or not torch.allclose(
+                observed_affine,
+                expected_affine,
+                rtol=0,
+                atol=1e-5,
+            ):
+                raise SpatialRestorationError(
+                    "LabeledPreprocessedCase.model_label affine does not match its "
+                    "declared model-space geometry."
+                )
         if not isinstance(self.native_label_metadata, NativeImageMetadata):
             raise InferenceInputError(
                 "LabeledPreprocessedCase.native_label_metadata must be NativeImageMetadata."
             )
+        if self.native_label.shape[0] != self.case.image.shape[0]:
+            raise InferenceInputError(
+                "LabeledPreprocessedCase.native_label batch size must match the "
+                "preprocessed image batch size."
+            )
         if tuple(int(value) for value in self.native_label.shape[2:]) != (
             self.native_label_metadata.shape
         ):
-            raise InferenceInputError(
+            raise SpatialRestorationError(
                 "LabeledPreprocessedCase.native_label spatial shape must match "
                 "native_label_metadata."
             )
+
+    @property
+    def case_id(self) -> str:
+        return self.case.case_id
+
+    @property
+    def model_geometry(self) -> SpatialGeometry:
+        return self.case.spatial_trace.model
+
+    @property
+    def native_label_geometry(self) -> SpatialGeometry:
+        return self.native_label_metadata.geometry
 
 
 @dataclass(frozen=True)

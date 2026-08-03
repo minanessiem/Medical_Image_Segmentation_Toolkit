@@ -257,6 +257,7 @@ class TestModelVolumeIO(unittest.TestCase):
         labeled = LabeledPreprocessedCase(
             case=case,
             model_label=torch.zeros((1, 1, 2, 2, 2)),
+            model_label_geometry=model_geometry,
             native_label=torch.ones((1, 1, 3, 4, 5)),
             native_label_metadata=replace(native_metadata, canonical_key="label"),
         )

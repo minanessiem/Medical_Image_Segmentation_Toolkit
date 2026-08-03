@@ -168,6 +168,11 @@ class TestInferencePreprocessing(unittest.TestCase):
             self.assertEqual(tuple(unlabeled.image.shape), (1, 1, 4, 5, 3))
             self.assertEqual(tuple(labeled.model_label.shape), (1, 1, 4, 5, 3))
             self.assertEqual(tuple(labeled.native_label.shape), (1, 1, 4, 5, 3))
+            self.assertEqual(labeled.model_label_geometry, labeled.model_geometry)
+            self.assertEqual(
+                labeled.native_label_geometry,
+                labeled.native_label_metadata.geometry,
+            )
 
             metadata = unlabeled.native_metadata["T1"]
             self.assertEqual(metadata.shape, (4, 5, 3))
