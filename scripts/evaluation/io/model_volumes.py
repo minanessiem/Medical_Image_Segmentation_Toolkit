@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import replace
 from typing import Any, Dict, Optional, Tuple
 
 import nibabel as nib
@@ -14,8 +15,14 @@ from tqdm import tqdm
 
 from scripts.evaluation.core.contracts import VolumeSample
 from scripts.evaluation.core.model_loader import is_discriminative_config, resolve_diffusion_type
-from src.inference.contracts import SpatialGeometry
-from src.inference.pipeline import build_model_probability_executor
+from src.data.loader_stack.preprocessing import get_preprocessing_adapter
+from src.inference.contracts import LabeledPreprocessedCase, SpatialGeometry
+from src.inference.pipeline import (
+    build_model_probability_executor,
+    predict_preprocessed_case,
+)
+from src.inference.preprocessing import preprocess_case
+from src.utils.loader_utils import LoaderDataUtils
 
 
 BatchType = Any
@@ -70,8 +77,6 @@ def iter_model_volume_samples(
 
     resolved_device = torch.device(device)
     inferer = build_model_probability_executor(backend=model, cfg=cfg)
-    total_batches = _safe_len(dataloader)
-    batch_iterable = _wrap_with_progress(dataloader, total_batches, show_progress)
     loader_mode = str(OmegaConf.select(cfg, "data_mode.loader_mode", default="") or "")
     subset = OmegaConf.select(cfg, "dataset.active_subsets.val", default=None)
     policy = inferer.policy
@@ -79,6 +84,22 @@ def iter_model_volume_samples(
 
     yielded = 0
     model.eval()
+    if policy.output_space == "native_input":
+        yield from _iter_native_model_volume_samples(
+            inferer=inferer,
+            dataloader=dataloader,
+            cfg=cfg,
+            device=resolved_device,
+            show_progress=show_progress,
+            max_samples=max_samples,
+            loader_mode=loader_mode,
+            subset=subset,
+            policy_source=policy_source,
+        )
+        return
+
+    total_batches = _safe_len(dataloader)
+    batch_iterable = _wrap_with_progress(dataloader, total_batches, show_progress)
     with torch.no_grad():
         for batch_index, batch in enumerate(batch_iterable):
             image, label, sample_ids, metas = _unpack_batch(batch)
@@ -140,6 +161,164 @@ def iter_model_volume_samples(
                 sample.validate()
                 yield sample
                 yielded += 1
+
+
+def _iter_native_model_volume_samples(
+    *,
+    inferer: Any,
+    dataloader: Iterable[BatchType],
+    cfg: DictConfig,
+    device: torch.device,
+    show_progress: bool,
+    max_samples: Optional[int],
+    loader_mode: str,
+    subset: object,
+    policy_source: str,
+) -> Iterator[VolumeSample]:
+    configured_batch_size = int(
+        OmegaConf.select(cfg, "validation.val_batch_size", default=1) or 1
+    )
+    if configured_batch_size != 1:
+        raise ValueError(
+            "Native-space repository-model evaluation processes one case-specific "
+            "spatial trace at a time and requires validation.val_batch_size=1."
+        )
+
+    records = _resolve_dataset_records(dataloader)
+    dataset_id = str(OmegaConf.select(cfg, "dataset.id", default="") or "").strip()
+    if not dataset_id:
+        raise ValueError("Native-space evaluation requires dataset.id.")
+    adapter = get_preprocessing_adapter(dataset_id)
+    modalities = OmegaConf.select(cfg, "dataset.modalities", default=None)
+    required_keys = adapter.resolve_required_raw_modalities(modalities)
+    dataset_cfg = OmegaConf.to_container(cfg.dataset, resolve=True)
+    if not isinstance(dataset_cfg, Mapping):
+        raise ValueError("Native-space evaluation requires dataset configuration mapping.")
+
+    selected_records = records
+    if max_samples is not None:
+        selected_records = records[:max_samples]
+    record_iterable: Iterable[Mapping[str, Any]] = selected_records
+    if show_progress:
+        record_iterable = tqdm(
+            selected_records,
+            total=len(selected_records),
+            desc="Evaluating native validation volumes",
+            leave=True,
+        )
+
+    with torch.no_grad():
+        for record in record_iterable:
+            case_id = str(record.get("caseID", "")).strip()
+            if not case_id:
+                raise ValueError(
+                    "Native-space evaluation dataset record is missing caseID."
+                )
+            case_input = LoaderDataUtils.resolve_case_input_paths(
+                filedict=record,
+                base_modalities=required_keys,
+                include_label=True,
+            )
+            missing = [key for key in (*required_keys, "label") if key not in case_input]
+            if missing:
+                raise ValueError(
+                    f"Native-space evaluation record {case_id!r} is missing paths "
+                    f"for {missing}."
+                )
+            preprocessed = preprocess_case(
+                dataset_id=dataset_id,
+                case_id=case_id,
+                raw_modalities={key: case_input[key] for key in required_keys},
+                dataset_cfg=dataset_cfg,
+                label_path=case_input["label"],
+                load_labels=True,
+            )
+            if not isinstance(preprocessed, LabeledPreprocessedCase):
+                raise ValueError(
+                    "Native-space evaluation requires labeled preprocessing to return "
+                    "LabeledPreprocessedCase."
+                )
+            device_case = replace(
+                preprocessed.case,
+                image=preprocessed.case.image.to(device),
+            )
+            prediction = predict_preprocessed_case(
+                inferer,
+                device_case,
+                progress_label=case_id,
+                show_window_progress=show_progress,
+            )
+            pred_volume = _ensure_channel_first_volume(prediction.probability[0])
+            gt_volume = _ensure_channel_first_volume(preprocessed.native_label[0])
+            metadata = {
+                "source": "live_model_volume",
+                "loader_mode": loader_mode,
+                "inference_policy_source": policy_source,
+                "output_space": "native_input",
+                "precision": inferer.policy.precision,
+                "shape": tuple(int(dim) for dim in pred_volume.shape),
+                "reference_spacing_xyz": list(
+                    preprocessed.native_label_metadata.spacing
+                ),
+                "spatial_restoration_applied": bool(
+                    prediction.provenance["spatial_restoration"]["applied"]
+                ),
+            }
+            if subset is not None:
+                metadata["subset"] = str(subset)
+            for key in ("siteID", "site_id", "metadata"):
+                if key in record:
+                    metadata[key] = _metadata_value_to_python(record[key])
+
+            sample = VolumeSample(
+                case_id=case_id,
+                volume_id=case_id,
+                prediction_volume=pred_volume,
+                ground_truth_volume=gt_volume,
+                prediction_space="native_input",
+                reference_space="native_input",
+                prediction_geometry=prediction.spatial_trace.original,
+                reference_geometry=preprocessed.native_label_metadata.geometry,
+                metadata=metadata,
+            )
+            sample.validate()
+            yield sample
+
+
+def _resolve_dataset_records(
+    dataloader: Iterable[BatchType],
+) -> list[Mapping[str, Any]]:
+    dataset = getattr(dataloader, "dataset", None)
+    if dataset is None:
+        raise ValueError(
+            "Native-space evaluation requires a dataloader with an inspectable dataset "
+            "so raw case paths can enter label-aware shared preprocessing."
+        )
+
+    indices = None
+    while hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
+        parent = dataset.dataset
+        current_indices = [int(value) for value in dataset.indices]
+        if indices is None:
+            indices = current_indices
+        else:
+            indices = [current_indices[index] for index in indices]
+        dataset = parent
+
+    database = getattr(dataset, "database", None)
+    if not isinstance(database, Sequence):
+        raise ValueError(
+            "Native-space evaluation requires the validation dataset to expose its "
+            "normalized case records through dataset.database."
+        )
+    records = list(database)
+    if indices is not None:
+        records = [records[index] for index in indices]
+    if any(not isinstance(record, Mapping) for record in records):
+        raise ValueError(
+            "Native-space evaluation dataset.database must contain mapping records."
+        )
+    return records
 
 
 def resolve_batch_item_identity(

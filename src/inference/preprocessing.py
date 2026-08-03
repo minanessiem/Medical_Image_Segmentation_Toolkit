@@ -116,6 +116,13 @@ def _model_geometry(image: torch.Tensor) -> SpatialGeometry:
 
 
 def _transform_history(image: torch.Tensor) -> tuple[Mapping[str, Any], ...]:
+    pending = tuple(getattr(image, "pending_operations", ()))
+    if pending:
+        raise InferenceInputError(
+            "Dataset preprocessing left pending spatial operations on the model input. "
+            "Shared inference requires all lazy transforms to be materialized before "
+            "capturing the spatial trace."
+        )
     operations = getattr(image, "applied_operations", ())
     return tuple(dict(operation) for operation in operations if isinstance(operation, Mapping))
 

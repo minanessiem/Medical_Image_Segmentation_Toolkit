@@ -327,6 +327,15 @@ def validate_one_epoch(diffusion, val_dl, metrics, logger, global_step, cfg):
         runtime=inference_runtime,
         assessment=AssessmentContext(requires_ground_truth=True),
     )
+    if infer_batch.policy.output_space != "model_preprocessed":
+        from src.inference.contracts import InvalidInferencePolicyError
+
+        raise InvalidInferencePolicyError(
+            "During-training validation consumes transformed tensor batches and cannot "
+            "restore case-specific native_input geometry. Use repository-model "
+            "evaluation for native-space assessment, or select "
+            "inference.output_space=model_preprocessed for training validation."
+        )
     diffusion.eval()
     progress_metric_keys = _resolve_validation_progress_metric_keys(cfg)
     

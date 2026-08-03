@@ -7,7 +7,10 @@ import torch
 from omegaconf import OmegaConf
 
 from src.inference.policy import parse_inference_policy
-from src.inference.contracts import InvalidInferenceRuntimeError
+from src.inference.contracts import (
+    InvalidInferencePolicyError,
+    InvalidInferenceRuntimeError,
+)
 from src.training.trainer import validate_one_epoch
 
 
@@ -140,6 +143,46 @@ class TestTrainingValidationInference(unittest.TestCase):
                 )
 
         self.assertEqual(executor_calls, [])
+        self.assertEqual(diffusion.eval_calls, 0)
+        self.assertEqual(diffusion.train_calls, 0)
+
+    def test_training_validation_rejects_native_output_without_case_trace(self):
+        cfg = OmegaConf.create(
+            {
+                "device": "cpu",
+                "validation": {"ensemble": {"enabled": False}},
+            }
+        )
+        diffusion = DummyDiffusion()
+
+        def executor(conditioned_image, progress_label=None, show_window_progress=True):
+            raise AssertionError("native policy must fail before tensor prediction")
+
+        executor.policy = parse_inference_policy(
+            {
+                "output_space": "native_input",
+                "sliding_window": {"enabled": False},
+            },
+            model_roi=(2, 2, 2),
+        )
+
+        with patch(
+            "src.inference.pipeline.build_model_probability_executor",
+            return_value=executor,
+        ):
+            with self.assertRaisesRegex(
+                InvalidInferencePolicyError,
+                "repository-model evaluation",
+            ):
+                validate_one_epoch(
+                    diffusion=diffusion,
+                    val_dl=[],
+                    metrics=[RecordingMetric()],
+                    logger=None,
+                    global_step=10,
+                    cfg=cfg,
+                )
+
         self.assertEqual(diffusion.eval_calls, 0)
         self.assertEqual(diffusion.train_calls, 0)
 

@@ -254,6 +254,32 @@ class PreprocessedCase:
             raise InferenceInputError("PreprocessedCase.image must contain only finite values.")
         if not isinstance(self.spatial_trace, SpatialTrace):
             raise InferenceInputError("PreprocessedCase.spatial_trace must be SpatialTrace.")
+        if self.image.ndim == 5:
+            observed_shape = tuple(int(value) for value in self.image.shape[2:])
+            if observed_shape != self.spatial_trace.model.shape:
+                raise SpatialRestorationError(
+                    "PreprocessedCase.image spatial shape does not match the recorded "
+                    f"model grid: image={observed_shape}, "
+                    f"trace={self.spatial_trace.model.shape}."
+                )
+            image_affine = getattr(self.image, "affine", None)
+            if image_affine is not None:
+                observed_affine = torch.as_tensor(image_affine).detach().cpu()
+                expected_affine = torch.tensor(
+                    self.spatial_trace.model.affine,
+                    dtype=observed_affine.dtype,
+                )
+                if observed_affine.shape != (4, 4) or not torch.allclose(
+                    observed_affine,
+                    expected_affine,
+                    rtol=0,
+                    atol=1e-5,
+                ):
+                    raise SpatialRestorationError(
+                        "PreprocessedCase.image affine does not match the recorded "
+                        "model-grid affine. Refusing spatial restoration from an "
+                        "inconsistent trace."
+                    )
         if not isinstance(self.native_metadata, Mapping) or any(
             not isinstance(key, str) or not isinstance(value, NativeImageMetadata)
             for key, value in self.native_metadata.items()
@@ -271,6 +297,12 @@ class PreprocessedCase:
                 raise InferenceInputError(
                     f"PreprocessedCase.reference_key {self.reference_key!r} is absent from "
                     "native_metadata."
+                )
+            reference_geometry = self.native_metadata[self.reference_key].geometry
+            if reference_geometry != self.spatial_trace.original:
+                raise SpatialRestorationError(
+                    "PreprocessedCase native reference geometry does not match "
+                    "SpatialTrace.original."
                 )
         elif self.reference_key is not None:
             raise InferenceInputError(
@@ -381,6 +413,7 @@ class PredictionResult:
     output_space: str
     spatial_trace: SpatialTrace
     mask: Optional[torch.Tensor] = None
+    native_reference: Optional[NativeImageMetadata] = None
     provenance: Mapping[str, Any] = field(default_factory=dict)
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
     resources: Optional[TimingResourceRecord] = None
@@ -432,6 +465,23 @@ class PredictionResult:
             if not bool(torch.all((self.mask == 0) | (self.mask == 1)).item()):
                 raise InvalidPredictionError(
                     "PredictionResult.mask must contain only binary values {0, 1}."
+                )
+        if self.native_reference is not None and not isinstance(
+            self.native_reference,
+            NativeImageMetadata,
+        ):
+            raise InvalidPredictionError(
+                "PredictionResult.native_reference must be NativeImageMetadata or None."
+            )
+        if self.output_space == "native_input":
+            if self.native_reference is None:
+                raise SpatialRestorationError(
+                    "PredictionResult.native_reference is required for native_input output."
+                )
+            if self.native_reference.geometry != self.spatial_trace.original:
+                raise SpatialRestorationError(
+                    "PredictionResult.native_reference geometry does not match the "
+                    "declared native output grid."
                 )
         if self.resources is not None and not isinstance(
             self.resources, TimingResourceRecord

@@ -118,13 +118,6 @@ def build_model_evaluation_request(cfg: DictConfig) -> ModelEvaluationRequest:
             threshold_sweep=threshold_protocol.mode != "fixed",
         ),
     )
-    if resolved_inference.policy.output_space == "native_input":
-        raise ValueError(
-            "Repository-model evaluation cannot yet return native_input probabilities. "
-            "Cut 7 must restore the floating probability map and select the original-grid "
-            "label before native-space metrics are certified."
-        )
-
     use_ema = bool(OmegaConf.select(cfg, "evaluation.checkpoint.use_ema", default=False))
     checkpoint_path = find_checkpoint(
         run_dir=run_dir,

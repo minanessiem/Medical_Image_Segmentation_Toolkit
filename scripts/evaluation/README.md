@@ -30,8 +30,13 @@ inference through repository dataloaders, and writes JSON/CSV/text artifacts.
 The canonical `evaluate_model` path supports geometry-aware 3D discriminative
 volume evaluation. Every prediction/reference pair must declare the same
 `model_preprocessed` or `native_input` space and matching shape, affine,
-spacing, and orientation before metrics run. Repository-model `native_input`
-evaluation remains blocked until spatial restoration lands in Cut 7.
+spacing, and orientation before metrics run. For `model_preprocessed`, the
+evaluator consumes the transformed image/label batch. For `native_input`, it
+re-enters the shared case-aware preprocessor from each normalized raw record,
+restores the floating probability to that case's selected native reference
+grid, and pairs it with the untouched native label. Native evaluation requires
+`validation.val_batch_size=1` and fails if prediction and label geometry do not
+match exactly enough for the typed spatial contract.
 
 Repository and nnU-Net 2D slice paths do not currently carry enough typed
 parent-volume geometry and reconstruction information to make a truthful 3D

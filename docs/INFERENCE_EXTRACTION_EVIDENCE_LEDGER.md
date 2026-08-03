@@ -16,7 +16,8 @@ Cut-5 nnU-Net precursor, and E014 records the accepted Cut 5 evaluator and its
 live repository-model/nnU-Net evidence. E015 records the Cut 6 training-
 validation config migration and live shared-predictor validation. E002-E006 and E008 are retained only
 as compact supersession records because they do not represent accepted current
-designs.
+designs. E016 records the current Cut 7 native-restoration evidence; its
+implementation remains pending user review and cut acceptance.
 
 ## Operating rule
 
@@ -1618,6 +1619,238 @@ Grand Challenge container behavior. Changes to training config composition,
 runtime assessment, shared probability execution, ensemble semantics, the
 pinned model/input state, or relevant PyTorch/MONAI numerical behavior require
 the corresponding evidence to be rerun.
+
+---
+
+## Evidence item E016: Cut 7 native-space restoration and NIfTI correctness
+
+### Status and question
+
+| Field | Value |
+|---|---|
+| Evidence ID | `E016` |
+| Status | `RECORDED`; implementation acceptance remains pending Cut 7 review |
+| Base commit | `0d9ae4460133f785b97d338e31af75e6312cdf55` plus the uncommitted Cut 7 diff |
+| Environment | Desktop WSL `MedSegDiff_env`, MONAI 1.5.0, NVIDIA GeForce RTX 4070 Ti SUPER with 16,376 MiB |
+
+E016 asks whether a real repository DynUNet probability can traverse the
+case-aware, label-free preprocessing path, be inferred on its trained model
+grid, be continuously restored before thresholding, and be written as a
+binary NIfTI on the exact original T1 grid. It also asks whether the same
+restoration contract can supply native-grid repository-model evaluation
+without weakening the strict prediction/reference geometry checks from Cut 5.
+
+### Preprocessing trace characterization
+
+Before defining the inverse boundary, a four-case probe exercised the pinned
+ISLES26 validation records used by E014. The cases jointly covered identity
+geometry, an LAS-to-RAS left-right flip with 0.5 mm-to-1 mm resampling, an
+oblique affine, and 1.5 mm-to-1 mm resampling. For every case:
+
+- label-free and labeled preprocessing produced byte-identical image tensors;
+- the returned image remained a `MetaTensor` whose affine matched the recorded
+  model geometry;
+- native shape, affine, spacing, orientation, qform/sform, and their codes were
+  captured before preprocessing;
+- the applied MONAI history retained `Orientation` and `SpatialResample` where
+  applicable and contained no pending operations.
+
+Durable trace evidence:
+
+```text
+cut7_preprocessing_trace_probe.json
+7559deeb2910bf6aac0ea991bc8b1fe8eb2ab0a9b366be31c9caea44004056c0
+
+cut7_preprocessing_trace_probe.log
+036d36ec9ebd198c0437709cd81ed1a91486c3e4aec81c75b1b75be190641dde
+```
+
+### Contract and regression verification
+
+The synthetic Cut 7 fixtures cover identity, permutation, flip, anisotropic
+spacing, translation, odd shapes, oblique geometry, an exact world-space
+landmark, continuous probability restoration versus threshold-first
+restoration, independently varying case grids, corrupted/incomplete traces,
+empty/full masks, distinct qform/sform semantics, and refusal to write a
+model-space result through the native writer. Written files are reopened and
+checked for exact grid, header-form codes, `uint8` dtype, and binary values.
+
+The final focused native spatial/output suite passed 16/16 tests. Before the
+last four focused assertions were added, the complete inference regression
+family passed 61/61 and the complete evaluation regression family passed
+147/147. The added assertions exercise only the already-passing spatial
+landmark, padding, distinct-form, and fail-closed writer paths; they
+subsequently passed in the focused 16-test run.
+
+```text
+cut7_inference_regression.log
+8931a629c47c13ad32f8a35629dc58aee4590f692e134b9cb48b44a10ea2c298
+
+cut7_evaluation_regression.log
+4eedd6d758d61b42d946c73df80740e0419d3d05389942416089284758212e7e
+```
+
+The regression commands were:
+
+```bash
+python -m unittest discover -s tests -p 'test_inference*.py' -v
+python -m unittest discover -s tests -p 'test_evaluation*.py' -v
+```
+
+### Live label-free native-output replay
+
+The live replay used the pinned p5n1 DynUNet checkpoint
+`best_model_step_040000_dice_3d_0.5724` and case `sub-r035s015`. Its checkpoint
+SHA-256 was
+`120c93ee6a32f79829bf8a6b2d3ab7db59861f865ad1e8a37889f87ab0c82441`.
+The model predicted in RAS model space with shape `[192,256,256]` and
+approximately 1 mm spacing. Cut 7 restored the floating probability to the
+raw T1's LAS grid with shape `[192,512,512]` and spacing
+`[0.99989998,0.5,0.5]`, then applied threshold `0.5` and wrote the native mask.
+
+After reopening, native shape, effective affine, qform, sform, qform/sform
+codes, `uint8` dtype, and binary value set all passed. End-to-end time,
+including preprocessing, model loading, inference, restoration, writing, and
+reopening, was 8.91 seconds. Inference plus restoration took 4.36 seconds and
+peak allocated GPU memory was 1,869,463,040 bytes. This is Desktop evidence,
+not T4 release certification.
+
+```text
+cut7_live_native.log
+b1240bf1f650723c07f9f3a468291a63d241699c9a4515054d49c16795c8a185
+
+cut7_live_native_output/report.json
+f71a7de24656b2337d596f6119d53e89d8aa293b06f69f9d21f7c98b79adaff4
+
+cut7_live_native_output/segmentation.nii.gz
+632ca5ddc9bee3123bfbef568b16b82154507312093f306464abe95869045731
+```
+
+### Live native evaluator replay
+
+The repository evaluator was also composed with
+`inference=sliding_window_native`, the native runtime, FP32, validation batch
+one, and the focused E014 split. The configured `val_fast` subset contained
+one case, `sub-r049s033`, whose oblique 1.5 mm input exercises a materially
+different geometry from the label-free replay. The evaluator produced one
+strictly geometry-matched native `VolumeSample`, completed the fixed-threshold
+metric path, and reported Dice `0.714777` without using a compatibility
+fallback.
+
+```text
+cut7_live_native_evaluation.log
+0cf4bf4a31b0398d45ee53997f0281ca886d3400e41531859578b2cdccbfce22
+
+cut7_live_native_evaluation/canonical_results.json
+294c6f6313bd2005253c6afe0b488169ec9c00fd844cefca4214ad571b1871ff
+```
+
+### Expanded `val_full` native evaluator replay
+
+An additional Desktop replay selected the original ISLES26 `val_full` subset,
+which resolved to 193 three-dimensional volumes. It used the same pinned
+DynUNet checkpoint, `inference=sliding_window_native`, FP32, case batch one,
+and zero validation workers. The evaluator completed 184 volumes across their
+independent native grids without an OOM, worker-process failure, restoration
+failure, or prediction/reference geometry mismatch. At 14 minutes 51 seconds
+it inferred and restored the next case, `sub-r069s031`, then deliberately
+stopped before metric calculation with:
+
+```text
+Error: VolumeSample prediction/reference affine mismatch: equal tensor shapes do not establish a shared physical grid.
+```
+
+This is the known O007 source-data case, not a newly introduced Cut 7 failure.
+Its T1 and lesion mask both have native shape `[160,224,224]`, but their native
+affines differ by approximately `0.0007935` mm. The replay therefore confirms
+both broad case-specific restoration over 184 heterogeneous volumes and the
+required fail-closed behavior when a native reference label does not occupy
+the prediction's verified T1 grid. The remaining eight volumes were not
+reached, and this run must not be represented as a completed 193-case metric
+evaluation or as resolution of O007.
+
+The exact command selected `dataset.active_subsets.val=val_full`,
+`validation.val_batch_size=1`, `data_runtime.num_valid_workers=0`,
+`inference=sliding_window_native`, and `inference.precision=fp32`. Durable
+evidence:
+
+```text
+isles26_nested_15_5_best_2026-07-28.json
+349f890a1d64e578b7ac258668d903a4b7861899cf64ab6f215b62d85825576b
+
+cut7_val_full_native_evaluation.log
+e4d5f2a76f72191ca034b066706d3d35902077280a4926c4aebc4bd8140190f0
+```
+
+To complete case-path coverage without needlessly repeating the 184 successful
+cases, a follow-up evidence-only split retained the original loader-compatible
+training partition but selected only the eight validation cases after
+`sub-r069s031`:
+
+```text
+sub-r069s032  sub-r069s036  sub-r069s037  sub-r070s005
+sub-r071s014  sub-r071s018  sub-r071s019  sub-r071s024
+```
+
+The temporary split explicitly contained neither `sub-r065s005` nor
+`sub-r069s031`; the authoritative split was not modified. All eight cases
+completed in 33 seconds, produced exactly eight unique per-case rows carrying
+`native_input` prediction/reference metadata, and wrote the complete canonical
+artifact set. The fixed-threshold (`0.5`) mean Dice over this remaining subset
+was `0.423900`. Artifact-level verification established that the first log
+contains 184 successful cases (including `sub-r065s005`) before the deliberate
+`sub-r069s031` rejection, while the second result contains exactly the eight
+previously unreached cases. Excluding both O007 cases from the certification
+claim therefore gives complete case-path coverage of the other 191/191
+`val_full` volumes: 183 from the first run plus eight from the follow-up.
+
+```text
+cut7_remaining_after_r069s031_v2.json
+e805e2f623bf15a74e348c3bf95d48baa7630f4c689b585f102992662761d00a
+
+cut7_remaining_native_evaluation_v2.log
+1cad1c1e34a471670bc152d1abea14c26e54f3f79726cd88bb5a4b86e99e0874
+
+cut7_remaining_native_evaluation_v2/canonical_results.json
+370480d3a07d2f19162d5d526e9f03fea1cac4d48c817e1e08845e60dead1ca4
+
+cut7_remaining_native_evaluation_v2/resolved_evaluation_config.yaml
+7e2a77839d4f08c8b445065c25ed5574f2acdcaa50c6d82f55c383c292537db6
+
+cut7_remaining_native_evaluation_v2/volume_metrics_per_threshold.csv
+e4a44e01dfcd60152c2ecc07edfd06a75b027278c9334e78795558577a4dc50c
+
+cut7_remaining_native_evaluation_v2/per_case_threshold_metrics.csv
+bfadeb4821185fb8831dec44861455c31ae51166c9b57518835cd8452c60c161
+```
+
+All E016 artifacts remain outside Git under:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut7_20260802a/
+```
+
+### Acceptance scope and invalidation
+
+E016 establishes on the pinned Desktop snapshot that Cut 7 restores floating
+probabilities before thresholding; uses the case-specific T1 reference rather
+than a dataset-wide geometry; preserves the original shape, affine,
+orientation, qform/sform and codes; writes only validated native `uint8`
+binary masks through the native writer; and supplies both model-preprocessed
+and native-input repository evaluation without silently pairing different
+spaces.
+
+It does not certify the Grand Challenge socket lifecycle, Docker image,
+AWS T4 timing/memory, LRZ `.sqsh` parity, native FP16 (O004), 2D reconstruction
+(O005), or completed full-split labeled native metrics while O007 remains
+unresolved. The expanded replay now directly demonstrates that O007 blocks
+that certification at `sub-r069s031` after 184 successful native cases, while
+the follow-up establishes case-path coverage for every otherwise-valid
+`val_full` volume.
+The blind label-free result is not blocked by O007. Changes to preprocessing,
+spatial trace capture, interpolation conventions, threshold ordering, NIfTI
+materialization, the pinned model/input, or relevant MONAI/nibabel behavior
+require the corresponding evidence to be rerun.
 
 ---
 

@@ -1,8 +1,8 @@
 # PRD and CAP: Shared Inference Package Extraction and ISLES26 Grand Challenge Submission Builder
 
-**Document version:** 1.3
+**Document version:** 1.4
 **Original date:** 2026-07-29
-**Last revised:** 2026-08-02
+**Last revised:** 2026-08-03
 **Status:** Draft for implementation
 **Primary competition:** ISLES26 3D lesion segmentation
 **Primary model scope:** Existing 3D discriminative MONAI DynUNet checkpoints
@@ -26,6 +26,8 @@ The target system has three separate but interlocking release components:
 3. **Model artifact archive and model lifecycle support**: one complete saved training config and one selected checkpoint, plus the selected shared inference config and provenance, packaged so Grand Challenge expands them under `/opt/ml/model/`. Shared model-domain code reconstructs the model through the existing factory, loads its weights, and moves it to the requested device. The saved `dataset.id`, modality contract, and preprocessing config select a registered dataset preprocessing adapter. Historical training-validation settings remain present for provenance but are not active when an explicit inference config is selected.
 
 The first certified release must prioritize correctness, spatial fidelity, reproducibility, T4 memory safety, and the ten-minute per-case runtime limit over optional competition enhancements.
+
+Post-training 3D evaluation requires richer case information than training-time validation: it may need both the jointly transformed model-space label and the untouched native-grid label, their geometries, and the exact preprocessing trace. This plan therefore does not enlarge the established training tuple or make ordinary training DataLoaders carry release-only metadata. A validation-only normalized record source and reusable typed evaluation-case producer will supply `LabeledPreprocessedCase` records directly to post-training evaluation. Both `model_preprocessed` and `native_input` evaluation will consume that same typed boundary and differ only in result/reference selection after prediction.
 
 ---
 
@@ -260,6 +262,8 @@ No fictional socket slug or path may be hardcoded while this manifest is unavail
 12. Build the image and model artifact archive independently or together.
 13. Produce machine-readable provenance and resource measurements for every release candidate.
 14. Keep Grand Challenge socket slugs and file layout at the transport boundary through an explicit user-supplied mapping to canonical dataset modality keys.
+15. Give post-training 3D evaluation a validation-only normalized record source and reusable typed case producer without constructing training datasets, samplers, worker pools, or augmentation pipelines.
+16. Preserve lightweight training dataset items while giving evaluation explicit access to model-space and native-space labels, geometries, and spatial traces.
 
 ### 5.2 Quality goals
 
@@ -287,7 +291,7 @@ The following are explicitly outside this CAP:
 - Rewriting metric implementations.
 - Unifying live repository PyTorch model execution with the external nnU-Net runtime.
 - Generic multi-GPU inference in the Grand Challenge container.
-- Case batching greater than one.
+- Case batching greater than one for geometry-aware post-training 3D evaluation or Grand Challenge invocation. Sliding-window window batching remains a separate inference-policy concern.
 - Serving multiple simultaneous requests.
 - DICOM ingestion.
 - Lesion-volume-conditioned postprocessing research.
@@ -415,8 +419,8 @@ scripts/gc_submission_builder model build
        |                   |                       |
        +-------------------+-----------------------+
                            |
-Input transport            |          Native validation data
-(/input, inputs.json)       |          (existing dataloaders + labels)
+Input transport            |          Post-training 3D evaluation
+(/input, inputs.json)       |          (validation-only case records)
          |                  |                       |
          v                  |                       |
 GC interface manifest      |                       |
@@ -426,6 +430,10 @@ slug -> raw dataset key     |                       |
                       v
        registered dataset preprocessing adapter
        selected by saved dataset.id; load_labels explicit
+                      |
+                      v
+        typed case producer (pipeline built once)
+        PreprocessedCase | LabeledPreprocessedCase
                       |
                       v
                  src/inference
@@ -444,8 +452,10 @@ slug -> raw dataset key     |                       |
 |---|---|---|
 | Model architecture and trained preprocessing | Saved run config | Prevent deployment drift |
 | Deterministic transform construction for a known dataset | Registered adapter in `src/data/loader_stack/` | Reuse the repository's trained preprocessing source of truth for labeled and label-free paths |
+| Validation-only case discovery and subset routing | Normalized record source in `src/data/loader_stack/` | Post-training evaluation must not construct training datasets, samplers, augmentations, workers, or require a non-empty training partition merely to discover validation cases |
 | Label loading | Explicit dataset-construction argument `load_labels` | Preserve labeled defaults while supporting blind inference without coupling behavior to `test_flag` |
 | Per-case native image geometry | Preprocessing request/result contracts | Native restoration cannot rely on a dataset-wide reference geometry |
+| Rich post-training evaluation case | Reusable typed case producer in `src/inference/` | Build deterministic preprocessing once and expose model image, trace, both label spaces, and both geometries without inflating training tuples |
 | Exact weights | Model artifact archive | Independently replaceable artifact |
 | Model artifact validation, reconstruction, weight loading, and device preparation | `src/models/` | Shared model lifecycle behavior must not depend on inference or evaluation frontends |
 | Output space, precision, sliding-window policy, TTA, ensemble, fixed threshold, postprocessing | Shared `inference` config | One prediction policy across all consumers |
@@ -453,6 +463,7 @@ slug -> raw dataset key     |                       |
 | Case batch, workers, timeout, device and allowed capabilities | `inference_runtime` profile | Location/mode constraints must not duplicate scientific policy |
 | Probability prediction mechanics | `src/inference/` | Shared scientific behavior |
 | Pairing result and reference-label space | Evaluation/training consumers with shared contracts | Metrics are valid only when grids match |
+| Full-volume post-training case batching | Evaluation request boundary | Geometry-aware 3D evaluation processes one complete case at a time; `inference.sliding_window.sw_batch_size` independently controls windows within that case |
 | Semantic space and written geometry of a 3D nnU-Net dataset | Complete nnU-Net conversion preset plus converter | `nnunet.export_space` declares meaning; the exporter must write and verify the transformed/native grid it actually produced |
 | `/input`, `/output`, `inputs.json`, socket slugs, slug-to-canonical-key bindings, HTTP statuses | GC adapter and interface manifest | Platform transport only; shared preprocessing sees canonical dataset keys, never slugs |
 | Docker base, system libraries, Python packages, non-root user | GC builder/container | Runtime infrastructure only |
@@ -469,6 +480,7 @@ src/inference/
   policy.py                 # shared inference config parsing and validation
   runtime.py                # execution-profile capabilities and cross-validation
   preprocessing.py          # dataset-adapter dispatch and typed preprocessing requests/results
+  case_producer.py          # reusable producer for rich post-training evaluation cases
   predictors.py             # architecture-neutral protocol, validation, and backend registration
   sliding_window.py         # MONAI sliding-window orchestration
   augmentation.py           # invertible TTA definitions and de-augmentation
@@ -485,6 +497,7 @@ src/models/
 
 src/data/loader_stack/
   registry.py               # registered dataset capabilities and preprocessing-adapter lookup
+  record_source.py          # normalized validation-only record discovery without DataLoaders
   preprocessing.py          # shared deterministic builder/contracts if extraction proves useful
   isles24_loader.py          # ISLES24 adapter plus existing dataset orchestration
   isles26_loader.py          # ISLES26 adapter plus existing dataset orchestration
@@ -552,12 +565,12 @@ model, missing_keys, unexpected_keys = load_model(
 )
 predictor = build_probability_predictor(model)
 
-preprocessed = preprocess_case(
+case_producer = build_case_producer(
     dataset_id=saved_cfg.dataset.id,
-    raw_modalities=canonical_raw_inputs,
     dataset_cfg=saved_cfg.dataset,
     load_labels=False,
 )
+preprocessed = case_producer.preprocess(raw_modalities=canonical_raw_inputs)
 
 result = predict_case(
     predictor=predictor,
@@ -569,7 +582,7 @@ result = predict_case(
 
 Model construction, checkpoint loading, and device placement are model-domain operations.
 The inference API begins from prepared predictors and should not know how their
-config and checkpoint paths were discovered. Preprocessing begins from canonical raw dataset keys, not GC socket slugs, and dispatches through the adapter registered for the saved `dataset.id`. Its typed `PreprocessedCase` result contains the processed image, case identifier, native metadata, model-space geometry, and spatial trace. When `load_labels=True`, an extended labeled result may additionally expose the jointly transformed model-space label and the original native label; when `load_labels=False`, it contains no dummy, zero, or `None` label field. The returned prediction result
+config and checkpoint paths were discovered. Preprocessing begins from canonical raw dataset keys, not GC socket slugs, and dispatches through the adapter registered for the saved `dataset.id`. Its typed `PreprocessedCase` result contains the processed image, case identifier, native metadata, model-space geometry, and spatial trace. When `load_labels=True`, the required `LabeledPreprocessedCase` extension exposes both the jointly transformed model-space label and the untouched original native label, with independent verified geometry for each. When `load_labels=False`, `PreprocessedCase` contains no dummy, zero, or `None` label field. The producer constructs the deterministic adapter pipeline once and reuses it across records; `preprocess_case()` may remain as a one-case convenience facade. The returned prediction result
 should distinguish at least:
 
 - the configured primary result in `model_preprocessed` or `native_input` space;
@@ -761,6 +774,8 @@ Offline threshold analysis adds an `evaluation.threshold_protocol`. It does not 
 
 For `model_preprocessed` evaluation, prediction is paired with the jointly transformed label. For `native_input` evaluation, prediction is paired with the original native-grid label. The evaluator must validate shape and physical geometry before computing metrics.
 
+Geometry-aware post-training 3D evaluation processes complete cases one at a time in both spaces. `validation.val_batch_size`/the effective evaluation case batch must therefore be one at the evaluation request boundary; this is not a native-space or Grand Challenge-only limitation. It also does not mean one case per process or job: an evaluation run may iterate an entire split sequentially. `inference.sliding_window.sw_batch_size` remains independent and controls how many windows from the current case are sent through the predictor together. The shared `configs/validation/default.yaml` uses case batch one; any explicitly larger specialized training-validation preset is not accepted by the geometry-aware post-training 3D evaluator unless overridden to one.
+
 ### 8.9 Backward compatibility for existing runs
 
 Historical saved runs contain prediction settings under `cfg.validation.inference`, including the current representative DynUNet run. They remain valid inputs.
@@ -828,7 +843,11 @@ The complete saved config remains packaged for provenance and construction compa
 - deterministic selection of the canonical raw modality whose native grid is the output reference when a dataset has multiple aligned inputs;
 - label-required training augmentation checks.
 
+The loader stack also owns validation-only normalized record discovery. That source resolves the requested subset and dataset-specific datalist format into canonical case records without constructing datasets, DataLoaders, samplers, augmentation pipelines, or worker pools. It must not require a usable training partition when only validation records were requested.
+
 `test_flag` remains an independent partition-selection input. It must not set `load_labels`, and `load_labels` must not change partition selection. Existing labeled training, validation, and repository-model evaluation retain the default. Blind native inference and GC inference explicitly pass `False`.
+
+`src.inference` owns reusable case production from those normalized records. Label-free production returns `PreprocessedCase`; labeled post-training evaluation returns `LabeledPreprocessedCase` with the model image, spatial trace, native input metadata, jointly transformed model label and geometry, and untouched native label and geometry. This rich result is an evaluation/deployment boundary, not a replacement for lightweight training dataset tuples.
 
 ### 9.3 Inference policy owns
 
@@ -849,8 +868,10 @@ The complete saved config remains packaged for provenance and construction compa
 - analysis levels and reports;
 - training validation interval and progress metrics;
 - best-checkpoint selection.
+- complete-case batch size for post-training evaluation, fixed to one for geometry-aware 3D evaluation in this CAP.
 
 It does not define a second sliding-window, TTA, ensemble, output-space, or fixed deployment-threshold schema.
+Complete-case batch size must not be confused with `inference.sliding_window.sw_batch_size`, which controls window throughput within one case.
 
 ### 9.5 Inference runtime profile owns
 
@@ -944,19 +965,20 @@ second nnU-Net provenance subsystem.
 | `configs/inference/*.yaml` | Shared prediction policy | Compose from training validation, evaluation, native inference, container diagnostics, and GC deployment |
 | `configs/inference_runtime/*.yaml` | Execution capability profiles | Enforce native-Python/container/submission constraints without duplicating inference settings |
 | `src/data/loader_stack/registry.py` and contracts/factory routing | Register preprocessing capabilities | Select an implemented adapter by saved `dataset.id`; reject unknown/unimplemented dataset preprocessing clearly |
+| new `src/data/loader_stack/record_source.py` | Validation-only normalized record source | Reuse dataset-specific datalist parsing and subset routing without constructing training datasets, DataLoaders, samplers, augmentations, workers, or requiring a non-empty training partition |
 | `src/data/loader_stack/isles24_loader.py` | Share deterministic preprocessing and make labels explicit | Add backward-compatible `load_labels=True`, dynamic transform keys, metadata capture, and parity-preserving ISLES24 adapter behavior |
 | `src/data/loader_stack/isles26_loader.py` | Share deterministic preprocessing and make labels explicit | Remove the unconditional label assumption through `load_labels=True`, dynamic datalist/transform keys, metadata capture, and parity-preserving ISLES26 adapter behavior |
 | shared modality transforms, including `MergeProcessedChannelsTransform` | Preserve preprocessing semantics and metadata boundary | Capture native metadata before raw keys/meta are removed; do not duplicate modality processing in the container |
-| `src/inference/preprocessing.py` and contracts | Dataset-agnostic preprocessing consumer | Dispatch canonical raw-key inputs to the registered adapter and return typed label-free or labeled case results |
+| `src/inference/preprocessing.py`, new `src/inference/case_producer.py`, and contracts | Dataset-agnostic preprocessing and reusable case production | Build deterministic preprocessing once, dispatch canonical raw-key inputs through the registered adapter, and return typed label-free `PreprocessedCase` or rich `LabeledPreprocessedCase` results without changing training tuples |
 | `src/utils/valid_utils.py` | Source of the legacy inferer implementation, not its permanent façade | In Cut 4, transfer/remove only inference-policy resolution and direct/sliding-window prediction helpers; retain unrelated validation, memory, parallel, and generative utilities. Legacy config translation belongs in `src/inference.policy` |
-| `src/training/trainer.py::validate_one_epoch` | Direct shared predictor/config consumer | In Cut 4, migrate its probability-generation call directly to `src.inference`; in Cut 6, finish config composition and certify labels, metrics, progress, cadence, logging, and checkpoint behavior |
+| `src/training/trainer.py::validate_one_epoch` | Direct shared predictor/config consumer | In Cut 4, migrate probability generation directly to `src.inference`; in Cut 6, finish config composition, preserve the lightweight tuple/model-space-only guard, and certify labels, metrics, progress, cadence, logging, and checkpoint behavior |
 | `src/utils/train_utils.py` | Transfer model-owned channel helpers | Import the unchanged helpers from `src/models/model_config.py`; keep the DP/DDP training builder in place |
 | `src/training/checkpoint_utils.py` | Compatibility facade for moved loading helpers | Re-export the unchanged checkpoint-to-model helpers from `src/models/checkpoint_loading.py`; preserve resume behavior |
 | `src/diffusion/discriminative_adapter.py` | First predictor backend implementation/dependency | Retain backend-owned single/list/stacked-head interpretation, final-head selection, and sigmoid behavior; expose finite `[B, C, *spatial]` probabilities to the shared contract without architecture-name branching in `src.inference` |
 | `src/utils/ensemble.py` | Selective reuse/migration | Mean is eligible; soft STAPLE remains disabled for 3D until generalized |
 | `scripts/evaluation/core/model_loader.py` | Delegate common model construction/loading to `src/models/` | Preserve evaluation checkpoint CLI behavior and run-directory discovery while removing duplicated model lifecycle behavior |
-| `scripts/evaluation/io/model_volumes.py` | Direct shared predictor/config consumer | In Cut 4, migrate model-space probability generation directly; in Cut 5, retain volume identity/metadata and complete explicit result/reference-space and evaluation provenance integration |
-| `scripts/evaluation/core/evaluation_pipeline.py` | Assessment consumer | Continue metrics, threshold protocols, reports, and provenance; validate prediction/reference geometry |
+| `scripts/evaluation/io/model_volumes.py` | Unified typed-case prediction consumer | Replace separate model/native loops and dataloader-internal record reconstruction with one `LabeledPreprocessedCase` loop that selects the matching label/geometry from the declared result space |
+| `scripts/evaluation/core/evaluation_pipeline.py` | Assessment consumer and full-volume request boundary | Load normalized validation records, build the reusable case producer, enforce one complete case at a time, then continue metrics, threshold protocols, reports, provenance, and geometry validation |
 | `configs/nnunet/convert/*3d*.yaml` | Explicit 3D export-space source of truth | Declare `nnunet.export_space` as `native_input` or `model_preprocessed`; do not infer it in evaluation |
 | `scripts/nnunet/core/conversion_core.py` and `exporters.py` | Produce spatially truthful 3D nnU-Net datasets | Validate the declared export space, write transformed tensor geometry rather than a stale source affine, and extend existing dataset/provenance records |
 | `scripts/nnunet/core/io_adapters.py` and evaluation orchestration | Compliant external-model 3D producer | Consume conversion-owned space, validate prediction/reference NIfTI geometry, and emit the finalized volume-space contract before Cut 5 |
@@ -983,7 +1005,7 @@ Every implementation cut must preserve these invariants where applicable:
 7. **Probability-before-blending parity:** the initial sliding-window path predicts a probability for each window and blends those probabilities. Logit blending is not introduced without an explicit, separately validated policy.
 8. **Result-space contract:** every result declares `model_preprocessed` or `native_input`; every metric pairs prediction and reference in the same verified space.
 9. **GC spatial contract:** production GC output is always `native_input` and matches input shape and physical geometry.
-10. **Case batch invariant:** case batch size is one under `gc_submission`.
+10. **Full-volume case batch invariant:** geometry-aware post-training 3D evaluation and `gc_submission` process one complete case at a time in both result spaces. This is independent of sliding-window window batching and does not restrict how many cases a job may process sequentially.
 11. **Strict release loading:** the eventual release gate must reject missing/unexpected state-dict keys. The transition cut does not change the established permissive training/evaluation behavior.
 12. **Explicit policy precedence:** top-level `cfg.inference` replaces rather than field-merges with historical `cfg.validation.inference`.
 13. **No hidden fallback:** unsupported TTA, ensemble, precision, model family, output space, or interface fails clearly.
@@ -1008,6 +1030,9 @@ Every implementation cut must preserve these invariants where applicable:
 28. **3D-only geometry-aware evaluation:** repository and nnU-Net 2D slice
     paths fail before geometry-aware assessment until their parent-volume and
     reconstruction contracts are implemented and tested.
+29. **Lightweight training boundary:** ordinary training and training-validation dataset items retain their established lightweight tuple contract; native labels, source records, and restoration traces are not added to every training batch.
+30. **Evaluation record-source isolation:** post-training 3D evaluation obtains normalized validation records without constructing ordinary training datasets, DataLoaders, samplers, augmentation pipelines, or worker pools.
+31. **One rich evaluation case contract:** both repository-model result spaces consume `LabeledPreprocessedCase`; the evaluator selects the reference matching `PredictionResult.output_space` instead of maintaining separate preprocessing/prediction loops.
 
 ---
 
@@ -1258,12 +1283,12 @@ Cuts 0-2.
    - affine and voxel spacing;
    - orientation codes;
    - qform and sform values plus codes where available.
-10. Let the registered adapter select a deterministic canonical raw modality as the native output reference, then retain that reference geometry, model-space geometry, MONAI transform history, and any explicit non-MONAI trace required by Cut 7. Because within-case inputs are contractually aligned, this selection does not add geometry-comparison checks. Do not implement probability inversion in this cut.
+10. Let the registered adapter select a deterministic canonical raw modality as the native output reference, then retain that reference geometry, model-space geometry, MONAI transform history, and any explicit non-MONAI trace required by Cut 7C. Because within-case inputs are contractually aligned, this selection does not add geometry-comparison checks. Do not implement probability inversion in this cut.
 11. Trust the established within-case modality-alignment contract. Do not add new shape/affine/spacing/world-coordinate comparisons between raw modalities before preprocessing.
 12. Preserve the exact trained orientation, spacing, intensity, modality-processing, channel-order, and padding behavior from the resolved saved config.
 13. Preserve the default labeled item/tuple contract, including `(image, label, case_id)` where currently exposed. Do not force existing training or evaluation callers to consume a new object merely to gain blind inference support.
 14. Define an explicit typed `PreprocessedCase` for label-free/shared inference with processed image, case ID, native metadata, model-space geometry, and spatial trace. Do not fabricate a zero label or expose a dummy/`None` label field.
-15. Permit an extended labeled result, requested explicitly by evaluation, to expose both the jointly transformed model-space label and original native label/geometry. The predictor remains label-free regardless of which preprocessing result was used.
+15. Establish the data required by the later `LabeledPreprocessedCase` contract: the jointly transformed model-space label and geometry plus the untouched original native label and geometry. Cut 7B turns this evidence into the reusable typed evaluation-case producer. The predictor remains label-free regardless of which preprocessing result was used, and ordinary training dataset tuples remain unchanged.
 16. Do not use a DataLoader worker pool for the external single-case inference path.
 17. Keep Grand Challenge socket/path parsing out of this cut. `src/inference.preprocessing` receives canonical raw modality keys after the transport adapter has applied its user-supplied interface bindings.
 
@@ -1281,7 +1306,7 @@ Cuts 0-2.
 - Two fixture cases with deliberately different native geometries each retain their own shape, affine, spacing, orientation, qform/sform, and dtype metadata.
 - Tests prove native metadata is captured before raw modality keys/meta are removed by channel merging.
 - All supported spatial fixtures retain a trace sufficient for later inversion, without claiming that inversion is already implemented.
-- Explicit labeled results make the jointly transformed label and original native label/geometry available for later same-space evaluation.
+- Fixtures prove the jointly transformed label and original native label/geometry can be retained for the Cut 7B typed producer without changing the ordinary training tuple.
 - Existing ISLES24/ISLES26 2D, 3D, full-volume, random-patch, datalist, and facade-routing tests remain green.
 - Input with wrong modality count, corrupt NIfTI, invalid/nonfinite data, unsupported rank, or an unavailable adapter fails clearly.
 - No new test asserts proactive within-case cross-modality alignment validation; that behavior is intentionally out of scope.
@@ -1291,7 +1316,8 @@ Cuts 0-2.
 - Existing training/evaluation datasets and external inference share the registered dataset's deterministic transform definition.
 - Dataset selection comes from the saved `dataset.id`; neither `src/inference` nor the GC runtime hardcodes ISLES26 preprocessing.
 - `load_labels=True` preserves legacy callers, `load_labels=False` supports blind inference without placeholders, and `test_flag` remains independent.
-- The deployment path retains per-case information sufficient for exact native-grid restoration in Cut 7.
+- The deployment path retains per-case information sufficient for the Cut 7B typed producer and exact native-grid restoration in Cut 7C.
+- The loader interface leaves a clear validation-record and rich-case extraction seam for Cuts 7A-7B without requiring training batches to carry the additional payload.
 - No training augmentation is accidentally applied during inference.
 
 ### Rollback
@@ -1301,7 +1327,7 @@ Keep extracted builders/adapters behind the existing loader API. If parity fails
 ### Explicit non-goals for this cut
 
 - Prediction, sliding-window execution, or activation handling (Cut 4).
-- Probability inversion or native-output writing (Cut 7).
+- Probability inversion or native-output writing (Cut 7C).
 - Socket-slug discovery, `inputs.json` parsing, or output path dispatch (Cut 10).
 - TTA, ensembling, threshold calibration, or postprocessing (Cut 8).
 - Automatic support for datasets without a registered, tested adapter.
@@ -1365,7 +1391,7 @@ Cuts 0-3.
 11. Remove `_resolve_validation_inference_mode`, `should_use_sliding_window_validation`, `resolve_validation_sliding_window_roi`, `build_validation_inferer`, and inference-only parsing helpers/imports from `src/utils/valid_utils.py`. Preserve its unrelated model-copy, memory, parallel-validation, and generative-validation utilities.
 12. Migrate all repository call sites of the removed inferer directly to `src.inference`, including training validation and live-model evaluation. `scripts/test_validation_memory.py` does not call this inferer and remains outside Cut 4; its unrelated multi-GPU/generative validation helpers remain in `valid_utils.py`. No internal compatibility façade remains.
 13. Translate legacy `cfg.validation.inference` only when no explicit `cfg.inference` is supplied and record which source won.
-14. Return model/preprocessed-space probabilities only in this cut. If the Cut 4 entrypoint receives `output_space=native_input` before Cut 7 is integrated, it must fail with an explicit unsupported-capability error rather than relabel a model-space tensor. Do not threshold predictions, calculate metrics, handle labels, write NIfTI, or add GC socket behavior; those remain later-cut or consumer responsibilities.
+14. Return model/preprocessed-space probabilities only in this cut. If the Cut 4 entrypoint receives `output_space=native_input` before Cut 7C is integrated, it must fail with an explicit unsupported-capability error rather than relabel a model-space tensor. Do not threshold predictions, calculate metrics, handle labels, write NIfTI, or add GC socket behavior; those remain later-cut or consumer responsibilities.
 
 ### Expected tests and testing components
 
@@ -1392,7 +1418,7 @@ Cuts 0-3.
 - The initial discriminative backend is supported and configured generative inference fails early with the documented future adapter hook.
 - The predictor contains no label, metric, NIfTI-writing, or socket logic.
 - The T4-safe window-batch default is enforced by deployment policy.
-- Cut 4 results are truthfully identified as model/preprocessed-space probabilities; native restoration remains Cut 7.
+- Cut 4 results are truthfully identified as model/preprocessed-space probabilities; native restoration remains Cut 7C.
 
 ### Rollback
 
@@ -1580,12 +1606,14 @@ producer code. It retains the current repository-model CLI and makes
 model-space parity evaluation and native-space deployment certification
 explicit rather than conflating them.
 
+Cut 5 establishes the evaluator's explicit `VolumeSample` space/geometry contract. It does not freeze the temporary repository-model data acquisition path as the final design. Cuts 7A-7D subsequently replace ordinary DataLoader construction and any evaluator-side reconstruction of raw records with the normalized validation-record source, reusable `LabeledPreprocessedCase` producer, and one dual-space model-volume loop. nnU-Net remains an already materialized external-volume producer and is unaffected by that repository-model producer refactor.
+
 ### Dependencies
 
 Cuts 0-4 and Cut-5-nnunet-precursor. Model-space evaluation integration can
 complete immediately. Native-space repository-model evaluation assertions
-depend on the Cut 7 restoration contract and may be finalized when that
-parallel cut lands.
+depend on the Cut 7C restoration contract and the Cut 7D producer migration,
+and may be finalized when those dependent cuts land.
 
 ### Affected files and components
 
@@ -1606,7 +1634,7 @@ parallel cut lands.
 - evaluation contract, reporting, entrypoint, and integration tests
 
 Explicitly unaffected are `scripts/nnunet/`, `configs/nnunet/`, nnU-Net dataset
-generation, model architecture implementations, and Cut 7 spatial inversion.
+generation, model architecture implementations, and Cut 7C spatial inversion.
 
 ### Desired changes
 
@@ -1616,10 +1644,12 @@ generation, model architecture implementations, and Cut 7 spatial inversion.
    interpretation that duplicates the shared probability contract. Do not
    apply another sigmoid merely because a tensor crosses the evaluation
    boundary.
-2. Continue obtaining images, labels, case IDs, and evaluation metadata through
-   existing dataset infrastructure with explicit `load_labels=True`; use the
-   Cut 3 labeled result when dual-space evaluation requires native and
-   transformed references.
+2. For the initial Cut 5 migration, continue obtaining images, labels, case IDs,
+   and evaluation metadata through existing dataset infrastructure with
+   explicit `load_labels=True`. Treat any evaluator-side record reconstruction
+   needed for early native-space work as transitional only; Cut 7D must replace
+   it with the Cut 7A normalized record source and Cut 7B
+   `LabeledPreprocessedCase` producer.
 3. Finalize `VolumeSample` so every accepted 3D sample explicitly carries
    `prediction_space`, `reference_space`, `prediction_geometry`, and
    `reference_geometry`. Remove the precursor's transitional acceptance of
@@ -1640,7 +1670,7 @@ generation, model architecture implementations, and Cut 7 spatial inversion.
    under evaluation config. Threshold sweeps consume shared probabilities;
    exporting one selected deployment threshold remains an explicit action.
 8. Pair `model_preprocessed` probabilities with the jointly transformed label.
-   After Cut 7, pair `native_input` probabilities with the original native-grid
+   After Cuts 7C-7D, pair `native_input` probabilities with the original native-grid
    label. Never resample a reference ad hoc inside the metric engine to conceal
    a space mismatch.
 9. Record useful operational provenance: producer type, prediction/reference
@@ -1681,7 +1711,7 @@ generation, model architecture implementations, and Cut 7 spatial inversion.
 - Repository and nnU-Net 2D inputs fail early with the actionable deferred
   geometry/reconstruction message.
 - Native-space repository-model evaluation runs against original-grid labels
-  after Cut 7 where fixtures/data permit.
+  after Cuts 7C-7D where fixtures/data permit.
 - The same inference policy can run in native Python and
   `gc_container_test` when both runtime profiles permit its capabilities.
 - Failure to load the requested checkpoint remains clear at the CLI.
@@ -1700,7 +1730,7 @@ generation, model architecture implementations, and Cut 7 spatial inversion.
   `gc_submission`.
 - No 2D slice path is presented as geometry-aware or assigned a guessed output
   space.
-- Native-space certification remains explicitly incomplete until Cut 7 passes.
+- Native-space certification remains explicitly incomplete until Cuts 7C-7E pass.
 
 ### Rollback
 
@@ -1762,6 +1792,8 @@ parity already green.
 8. Leave `train_one_epoch`, optimizer, scheduler, loss, gradient scaling, EMA, DP/DDP, and checkpoint writing unchanged.
 9. Leave diffusion sampling snapshots training-specific.
 10. Optionally route ordinary ensembled preview images through the predictor later, but do not make this a release blocker.
+11. Keep during-training validation on `model_preprocessed` output. Its lightweight tuple batches intentionally do not carry the case-specific native trace and untouched native label required for restoration; requesting `native_input` must fail early with an actionable message directing users to post-training repository-model evaluation.
+12. Set `configs/validation/default.yaml::validation.val_batch_size` to one. Explicit specialized training-validation presets may retain larger values for their own demonstrated use, but geometry-aware post-training 3D evaluation rejects any effective complete-case batch other than one at its request boundary.
 
 ### Expected tests and testing components
 
@@ -1774,6 +1806,8 @@ parity already green.
 - DP/DDP construction tests remain green.
 - Existing 3D diffusion runtime rejection tests remain green.
 - Snapshot logging still uses the appropriate diffusion-only API.
+- During-training `native_input` validation fails before prediction and explains that post-training evaluation is the supported native-space assessment path.
+- The default validation config resolves to complete-case batch one, while tests keep complete-case batching distinct from sliding-window `sw_batch_size`.
 
 ### Acceptance criteria
 
@@ -1781,6 +1815,7 @@ parity already green.
 - No training-forward or optimization behavior changed.
 - Existing training configs require no model-architecture edits.
 - New validation configs no longer duplicate prediction-policy fields.
+- Training tuples remain lightweight and are not expanded to carry native labels or spatial traces for the sake of post-training evaluation.
 
 ### Rollback
 
@@ -1788,30 +1823,146 @@ Revert only Cut 6's validation-config composition and surrounding assessment wir
 
 ---
 
-## 19. Cut 7: Native-space probability restoration and output correctness
+## 19. Cut 7 umbrella: Typed evaluation cases, native restoration, and dual-space certification
 
-### Context
+Cut 7 is divided into five dependency-ordered subcuts. This split preserves the already proven spatial work while correcting the temporary evaluator architecture that reconstructed native cases by reaching behind an ordinary DataLoader. Each subcut has its own rollback boundary. Cut 8 and all container release work depend on the complete Cut 7A-7E chain, not merely on the existence of a spatial resampler.
 
-Cut 7 consumes the architecture-neutral, model-space probability result established in Cut 4; it does not inspect raw model outputs or apply an activation.
+### 19.1 Cut 7A: Validation-only normalized record source
+
+#### Context
+
+Post-training evaluation needs canonical case records and validation-subset routing, but it does not need training datasets, samplers, random augmentation, DataLoader workers, or a valid/non-empty training partition. Constructing the full loader stack for record discovery couples evaluation to training-only assumptions and makes label/native-metadata acquisition unnecessarily indirect.
+
+This cut extracts only the existing dataset-specific record-reading and subset-selection behavior. It does not preprocess tensors or change training dataset construction.
+
+#### Dependencies
+
+Cuts 0-6 and the dataset-loader contracts established in Cut 3.
+
+#### Affected files and components
+
+- new `src/data/loader_stack/record_source.py`
+- `src/data/loader_stack/registry.py` and contracts only where reader registration is required
+- narrow ISLES24/ISLES26 datalist-reader wrappers around existing parsing behavior
+- new focused record-source tests
+- existing loader-stack routing and datalist parser tests
+
+#### Desired changes
+
+1. Add a public `load_case_records(cfg, subset_role="val", load_labels=True)`-style boundary that returns normalized canonical records for a requested subset.
+2. Dispatch record reading through the existing dataset registry and dataset-specific datalist parsers; do not infer behavior from paths or competition names.
+3. Preserve the established partition semantics and `test_flag`/`load_labels` independence without constructing datasets or DataLoaders.
+4. Permit validation-only discovery when the training partition is absent or empty.
+5. With `load_labels=True`, retain the existing informative missing-label failure. With `False`, return records that contain no fabricated label.
+6. Do not instantiate transforms, samplers, augmentation pipelines, worker pools, tensors, or GPU state.
+7. Keep ordinary training and validation loader entrypoints unchanged.
+
+#### Expected tests and testing components
+
+- ISLES24 and ISLES26 validation records match the corresponding existing loader-stack record identities and canonical modality paths.
+- Train/validation/test subset routing is characterized for both registered datasets.
+- `load_labels=True` and `False` preserve the Cut 3 label contract.
+- A validation-only config with an empty or absent training partition succeeds.
+- A spy/patch proves no Dataset, DataLoader, sampler, transform pipeline, or worker pool is constructed.
+- Unknown dataset IDs and malformed records fail with dataset/subset/case context.
+- Existing datalist parser and loader-routing regressions remain green.
+
+#### Acceptance criteria
+
+- Post-training consumers can obtain normalized validation records without constructing the ordinary training loader stack.
+- Record identity, modality order, partition selection, and label requirements match the registered dataset contract.
+- No existing training dataset item or loader signature changes.
+
+#### Rollback
+
+Remove the unused record-source boundary and its registrations. Because no evaluator consumer migrates until Cut 7D, rollback does not affect accepted training or evaluation behavior.
+
+### 19.2 Cut 7B: Reusable typed evaluation-case producer
+
+#### Context
+
+The existing lightweight `(image, label, case_id)` dataset item is appropriate for training and training-time validation, but insufficient for dual-space post-training evaluation. Native evaluation additionally needs the untouched native label, both label geometries, native input metadata, and the exact spatial trace. Adding those fields to every ordinary training batch would increase I/O, collation complexity, and memory pressure for consumers that do not use them.
+
+This cut introduces a separate rich evaluation interchange. It turns deterministic preprocessing into a reusable producer built once per evaluation job rather than rebuilding the adapter pipeline per case.
+
+#### Dependencies
+
+Cut 7A and the deterministic adapter/metadata evidence from Cut 3.
+
+#### Affected files and components
+
+- `src/inference/contracts.py`
+- `src/inference/preprocessing.py`
+- new `src/inference/case_producer.py`
+- `src/inference/__init__.py`
+- registered dataset preprocessing adapters/builders
+- new typed-case producer tests
+- existing Cut 3 preprocessing and loader parity tests
+
+#### Desired changes
+
+1. Define `LabeledPreprocessedCase` as an extension or sibling of `PreprocessedCase` with explicit fields for:
+   - processed model input and case ID;
+   - model-space geometry and complete spatial trace;
+   - case-specific native input reference metadata;
+   - jointly transformed model-space label and geometry;
+   - untouched native-grid label and independent native label geometry.
+2. Keep label-free `PreprocessedCase` free of dummy, zero, or `None` label fields.
+3. Build the registered deterministic preprocessing pipeline once per producer and reuse it across normalized records.
+4. Accept canonical normalized records from Cut 7A and resolve raw modality paths without Grand Challenge socket knowledge.
+5. Capture the native label before joint transforms while also retaining the transformed label produced by the exact image/label preprocessing chain.
+6. Validate tensor rank, finite values, required trace fields, and each declared geometry without assuming that different cases share a grid.
+7. Preserve `preprocess_case()` as a narrow one-case convenience facade implemented through the same producer/core where practical.
+8. Do not change ordinary training dataset tuples, collation, augmentation, or DataLoader behavior.
+
+#### Expected tests and testing components
+
+- One producer instance preprocesses multiple records while constructing the deterministic transform pipeline once.
+- Label-free and labeled production yield numerically identical processed images for the same record/config.
+- `LabeledPreprocessedCase` exposes both labels and their correct independent geometries.
+- The model-space label matches the processed image grid; the native label retains its original grid.
+- Cases with distinct shapes, spacings, orientations, translations, and oblique affines retain independent metadata and traces.
+- Results match the accepted deterministic loader output at the shared model-tensor boundary.
+- Missing labels, incomplete traces, unsupported ranks, and unavailable adapters fail before prediction with case-specific messages.
+- Existing training tuple and loader tests prove no payload or signature expansion.
+
+#### Acceptance criteria
+
+- Evaluation can obtain every artifact required for either output space through one typed case contract.
+- The producer reuses the repository's deterministic preprocessing source of truth and does not rebuild it for every record.
+- Training and training-time validation remain on their lightweight established data path.
+
+#### Rollback
+
+Remove the producer and rich contract while retaining the accepted Cut 3 label-optional preprocessing APIs. No evaluator switches to the new boundary until Cut 7D.
+
+### 19.3 Cut 7C: Native-space probability restoration and output correctness
+
+#### Context
+
+Cut 7C consumes the architecture-neutral model-space probability result established in Cut 4 and the case-specific trace/reference contract finalized in Cut 7B. It does not inspect raw model outputs or apply an activation.
 
 The previous competition failure mode—returning a mask aligned to the reoriented input rather than the original image—is a primary design risk. Spatial correctness must be independently certified before postprocessing or container work can be called complete.
 
-### Dependencies
+#### Dependencies
 
-Cuts 0-4; may proceed in parallel with consumer migrations once contracts are stable.
+Cuts 0-4 and Cut 7B. Spatial fixtures that do not require evaluator integration may be developed earlier, but final acceptance requires the typed case contract.
 
-### Affected files and components
+#### Affected files and components
 
 - new `src/inference/spatial.py`
+- new `src/inference/output.py`
 - `src/inference/preprocessing.py`
 - `src/inference/pipeline.py`
 - `src/inference/contracts.py`
+- `src/inference/__init__.py`
 - optionally reusable ideas from `scripts/evaluation/io/volume_exporter.py`
 - optionally reusable fixtures/patterns from nnU-Net affine tests
 - new `tests/test_inference_spatial_roundtrip.py`
 - new `tests/test_inference_native_output.py`
+- related inference pipeline and sliding-window tests
 
-### Desired changes
+#### Desired changes
 
 1. Accept the validated `inference.output_space` and retain model-space results without inversion when `model_preprocessed` is selected.
 2. Invert model-space probabilities through spacing and orientation transforms when `native_input` is selected, using the case-specific native reference geometry retained by the registered dataset adapter rather than a dataset-wide geometry assumption.
@@ -1821,17 +1972,19 @@ Cuts 0-4; may proceed in parallel with consumer migrations once contracts are st
 6. Validate corner or sampled voxel world coordinates within a defined tolerance.
 7. Reject restoration if the transform trace is incomplete or inconsistent.
 8. Threshold in the selected output space and only after restoration when native output is requested.
-9. Write binary arrays as `uint8` with values exactly `{0, 1}`.
-10. Re-open written files and verify:
+9. Keep the shared file writer intentionally native-only. It must refuse a `model_preprocessed` result so diagnostic tensors cannot accidentally be materialized as production segmentations.
+10. Write binary arrays as `uint8` with values exactly `{0, 1}`.
+11. Re-open written files and verify:
    - loadability;
    - shape;
    - affine;
+   - qform/sform values and codes;
    - dtype;
    - allowed voxel values.
-11. Return output-space and spatial validation facts in the result provenance.
-12. Make `gc_submission` reject `model_preprocessed`, while `native` and `gc_container_test` may select it.
+12. Return output-space and spatial validation facts in the result provenance.
+13. Make `gc_submission` reject `model_preprocessed`, while `native` and `gc_container_test` may select it.
 
-### Expected tests and testing components
+#### Expected tests and testing components
 
 - Round-trip tests for identity, axis permutation, axis flip, anisotropic spacing, translation, odd shapes, and oblique affine.
 - Synthetic landmark test: known world-space points occupy the corresponding output locations after preprocess/predict/invert.
@@ -1843,16 +1996,138 @@ Cuts 0-4; may proceed in parallel with consumer migrations once contracts are st
 - Deliberately corrupted trace or affine mismatch fails rather than writing a plausible file.
 - If both nibabel and MONAI metadata are used, their affine interpretation is cross-checked.
 - Cases with different native grids restore independently to their own recorded reference geometry.
+- The native writer rejects model-space results and reopens/validates successful outputs.
 
-### Acceptance criteria
+#### Acceptance criteria
 
 - Every native-output spatial fixture produces an output on the original input grid; every model-space fixture remains on and declares the expected transformed grid.
 - Shape equality alone is not accepted as proof; affine/world-space checks pass.
 - There is no code path that writes a model-space mask to the production Grand Challenge output socket.
 
-### Rollback
+#### Rollback
 
-No deployment fallback to un-inverted output is permitted. A failure blocks release and is corrected in this cut.
+No deployment fallback to un-inverted output is permitted. A failure blocks release and is corrected in this subcut.
+
+### 19.4 Cut 7D: Unified full-volume repository-model evaluator migration
+
+#### Context
+
+An early native-space evaluator implementation may prove restoration by reaching through `dataloader.dataset`, re-resolving records and raw paths, rebuilding preprocessing, and maintaining a separate native-only loop. That is evidence, not an acceptable final architecture. Model-space and native-space evaluation run the same predictor on the same preprocessed case; they differ only in where the probability result is returned and which already-carried reference label/geometry is selected.
+
+This cut removes the evaluator's dependence on ordinary DataLoader internals and gives both spaces one typed case-production and prediction loop. It also makes complete-case batch one a generic geometry-aware post-training 3D evaluation contract rather than misleadingly presenting it as native-space or container-specific.
+
+#### Dependencies
+
+Cuts 5-6 and Cuts 7A-7C.
+
+#### Affected files and components
+
+- `scripts/evaluation/core/evaluation_pipeline.py`
+- `scripts/evaluation/io/model_volumes.py`
+- `scripts/evaluation/evaluate_model.py` and SLURM evaluation argument plumbing where required
+- `configs/validation/default.yaml`
+- `scripts/evaluation/README.md`
+- `tests/test_evaluation_pipeline.py`
+- `tests/test_evaluation_io_model_volumes.py`
+- evaluation entrypoint/config/SLURM tests
+- related training-validation guard tests
+
+#### Desired changes
+
+1. For 3D repository-model `live_model` evaluation, call Cut 7A record discovery and construct one Cut 7B case producer. Do not call the ordinary training `get_dataloaders()` path.
+2. Iterate `LabeledPreprocessedCase` values through one repository-model volume loop:
+   - move the model image to the requested device;
+   - invoke the shared `predict_preprocessed_case`/equivalent pipeline;
+   - inspect `PredictionResult.output_space`;
+   - pair `model_preprocessed` with the transformed label/geometry or `native_input` with the untouched native label/geometry;
+   - construct the common `VolumeSample` and provenance.
+3. Remove `_iter_native_model_volume_samples`-style native-only orchestration, dataset/`Subset` unwrapping, evaluator-owned raw-path resolution, evaluator-owned adapter construction, and duplicate prediction loops.
+4. Keep space-specific operations inside the shared inference result path. Evaluator code may select the matching reference but must not independently restore probabilities.
+5. Enforce complete-case batch size one at the repository-model 3D evaluation request boundary for both output spaces. The error must explain the distinction from sliding-window `sw_batch_size` and that one job may still process many cases sequentially.
+6. Set `configs/validation/default.yaml::validation.val_batch_size` to one. Do not delete specialized opt-in training-validation profiles merely because the post-training evaluator rejects their larger case batch.
+7. Preserve the accepted during-training guard: training validation consumes lightweight transformed tuples and rejects `native_input`, directing users to post-training repository-model evaluation.
+8. Keep the native-only NIfTI writer from Cut 7C unchanged.
+9. Preserve the same evaluation entrypoint and composed DictConfig behavior for direct native Python execution and the LRZ SLURM wrapper. Move OmegaConf/dataset config conversion to the producer boundary; `model_volumes.py` receives typed cases, not raw config mappings.
+10. Keep nnU-Net's compliant 3D materialized-volume producer unchanged and keep all uncertified 2D paths failing early.
+
+#### Expected tests and testing components
+
+- The same synthetic `LabeledPreprocessedCase` passes through the one model-volume loop in both output spaces and selects the correct reference/geometry.
+- A spy proves the repository-model evaluator uses normalized records and does not construct an ordinary DataLoader.
+- Validation-only evaluation succeeds with an empty/absent training partition.
+- Tests prove there is no native-only record-resolution or prediction loop left in `model_volumes.py`.
+- Complete-case batch values other than one fail equally for both result spaces with an actionable case-versus-window batching message.
+- `configs/validation/default.yaml` resolves to case batch one; sliding-window `sw_batch_size` remains independently configurable.
+- Direct native execution and SLURM-composed DictConfig reach the same typed producer/evaluator boundary.
+- Model-space parity, native-space geometry validation, threshold protocols, and result/report schemas remain green.
+- During-training native output still fails early; model-space training validation remains green.
+- Existing compliant 3D nnU-Net evaluation remains green without entering the repository-model case producer.
+
+#### Acceptance criteria
+
+- Repository-model post-training 3D evaluation constructs no ordinary training DataLoader and does not inspect Dataset/Subset internals.
+- One typed loop handles both result spaces; only reference selection differs after the shared prediction result declares its space.
+- Complete-case batch one is expressed as a generic full-volume evaluation rule, not as a native-space synonym or a one-case-per-job restriction.
+- Direct native and LRZ SLURM evaluation use the same public entrypoint and config contract.
+- Training-time validation remains lightweight and model-space only.
+
+#### Rollback
+
+Revert the evaluator consumer to the accepted Cut 5/Cut 7C state while retaining Cuts 7A-7C as independently tested, unused capabilities. Do not restore a second spatial inversion implementation or alter training tuples.
+
+### 19.5 Cut 7E: Live parity, full-split certification, and evidence closure
+
+#### Context
+
+Unit and synthetic spatial tests establish contracts, but release confidence also requires a real saved model, real heterogeneous ISLES26 geometries, both output spaces, label-free output writing, and a completed validation traversal. Prior exploratory native evaluation is useful evidence but does not replace certification of the finalized Cut 7D architecture.
+
+This is primarily a verification/evidence cut. Production-code changes should occur only if a discovered defect requires correction and must then be covered by the appropriate preceding subcut's tests.
+
+#### Dependencies
+
+Cuts 7A-7D and the accepted Cut 0 checkpoint/environment evidence.
+
+#### Affected files and components
+
+- `docs/INFERENCE_EXTRACTION_EVIDENCE_LEDGER.md`
+- temporary non-versioned Desktop fixtures, output masks, evaluation reports, and runner scripts
+- focused regression commands/documentation only where necessary
+- no production source file in the expected success path
+
+#### Desired changes
+
+1. Use the pinned representative DynUNet run/config/checkpoint and record its identity plus the evaluated code state.
+2. Prove that model-space and native-space policies consume the same preprocessed model input and predictor path.
+3. Re-run model-space parity at the earliest shared representation within the environment-appropriate tolerance.
+4. Run label-free native output on at least one nontrivial case and reopen the NIfTI to verify exact input geometry, qform/sform, `uint8`, and `{0,1}` values.
+5. Exercise heterogeneous native grids, including orientation/spacing/shape changes and oblique cases supported by the dataset.
+6. Confirm known source image/label geometry violations fail closed with the recorded case and reason; do not weaken tolerances to complete a split.
+7. Create an evidence-only validation selection that excludes exactly the documented invalid source cases, then run all remaining valid cases as one completed evaluation through the finalized Cut 7D path. Previously explored partial traversals may guide selection but do not substitute for this completed run.
+8. Verify unique expected case count, no unaccounted failures, output/report completeness, spatial metadata, timings, and relevant artifact/config hashes.
+9. Distinguish Desktop GPU evidence from later T4/Grand Challenge certification; do not claim T4 resource compliance in this cut.
+10. Update the evidence ledger with commands, environment, case selection/exclusions, results, hashes, artifacts, limitations, and disposition of any failure.
+
+#### Expected tests and testing components
+
+- Focused Cut 7A-7D unit/integration suites pass in the Desktop MedSegDiff environment.
+- Model-space replay matches the accepted predictor/evaluator baseline within the declared tolerance.
+- Native label-free output passes reopened-file validation.
+- One-case and sequential multi-case live evaluation exercise both spaces through the unified producer.
+- The evidence-only full valid split completes once, with the expected unique case count and exactly documented exclusions.
+- Known invalid source geometry fails before metrics/output rather than being silently resampled or paired.
+- `git diff --check` and artifact/secret review pass for the versioned changes.
+
+#### Acceptance criteria
+
+- The finalized typed producer and unified evaluator, not the superseded exploratory helper, have live evidence across both output spaces.
+- Every valid selected case completes with verified result/reference geometry; every exclusion is evidence-backed and explicit.
+- Label-free native output is a valid binary NIfTI on the original input grid.
+- Evidence clearly separates scientific/spatial correctness on the Desktop from deferred T4/container resource qualification.
+- Cut 7A-7E is ready for review as the complete native-restoration and evaluator-boundary milestone.
+
+#### Rollback
+
+Evidence artifacts may be discarded and the run repeated without reverting accepted code. A scientific or spatial failure reopens the responsible subcut; it must not be waived in release documentation.
 
 ---
 
@@ -1864,7 +2139,7 @@ Training validation, offline evaluation, native/container diagnostics, and compe
 
 ### Dependencies
 
-Cuts 0-7 and a working canonical evaluation path.
+Cuts 0-6 and the complete Cut 7A-7E chain, including the finalized canonical evaluation path.
 
 ### Affected files and components
 
@@ -1929,7 +2204,7 @@ Grand Challenge permits model resources to be uploaded separately and expanded u
 
 ### Dependencies
 
-Cuts 1-4; Cut 8 if the final policy schema is included.
+Cuts 1-4 and the complete Cut 7A-7E chain; Cut 8 if the final enhancement policy schema is included.
 
 ### Affected files and components
 
@@ -1996,7 +2271,7 @@ The first released image is certified for the ISLES26 3D discriminative artifact
 
 ### Dependencies
 
-Cuts 0-7 and Cut 9. The final exact interface manifest is needed for upload certification but fixture interfaces can support development.
+Cuts 0-6, the complete Cut 7A-7E chain, and Cut 9. The final exact interface manifest is needed for upload certification but fixture interfaces can support development.
 
 ### Affected files and components
 
@@ -2212,8 +2487,6 @@ Cut 2  Model loading
 Cut 3  Shared preprocessing
   |
 Cut 4  Predictor/sliding window
-  |\
-  | +--> Cut 7  Spatial restoration
   |
 Cut-5-nnunet-precursor
        Space-aware 3D nnU-Net conversion/producer compliance
@@ -2221,6 +2494,16 @@ Cut-5-nnunet-precursor
 Cut 5  Geometry-aware evaluation migration and dual-space validation
   |
 Cut 6  Training validation/config migration
+  |
+Cut 7A Validation-only normalized record source
+  |
+Cut 7B Reusable typed evaluation-case producer
+  |
+Cut 7C Native-space restoration/output correctness
+  |
+Cut 7D Unified dual-space repository-model evaluator
+  |
+Cut 7E Live parity/full-valid-split evidence closure
   |
 Cut 8  TTA/ensemble/postprocessing
   |
@@ -2234,11 +2517,20 @@ Cut 12 Platform/release closure
 ```
 
 Cut-5-nnunet-precursor is mandatory before Cut 5 so Cut 5 can remain confined
-to the evaluator package. Cut 7 may begin after Cut 4 and proceed alongside the
-precursor and Cuts 5-6, but native-space repository-model evaluation and
-container release work must wait for its acceptance criteria. Cut 8 may be
-implemented incrementally; no optional enhancement blocks a correct baseline
-container.
+to the evaluator package. The Cut 7A-7E order is the acceptance order: record
+discovery precedes rich case production; typed production precedes final
+restoration certification; restoration and typed cases precede the unified
+evaluator; and the finalized path precedes live evidence closure. Spatial
+fixtures from Cut 7C may be developed earlier after Cut 4, but they do not make
+the umbrella complete without Cuts 7A-7B and 7D-7E. Cut 8 and container release
+work wait for all five Cut 7 subcuts. Cut 8 may be implemented incrementally;
+no optional enhancement blocks a correct baseline container.
+
+The current reviewed-but-uncommitted spatial/output implementation maps to Cut
+7C. Any exploratory `_iter_native_model_volume_samples`-style evaluator helper
+is explicitly transitional and is replaced, not preserved, by Cut 7D. Existing
+live evidence remains valuable input to Cut 7E, but final certification is
+repeated through the finalized typed producer and unified evaluator.
 
 Recommended pull-request granularity is one cut per PR, except very small scaffolding cuts may be combined if their tests and rollback boundaries remain clear.
 
@@ -2264,7 +2556,11 @@ Recommended pull-request granularity is one cut per PR, except very small scaffo
 - connected-component filtering;
 - interface dispatch and file discovery;
 - registered dataset-preprocessing adapter dispatch;
+- validation-only normalized record discovery without Dataset/DataLoader construction;
+- validation-subset discovery with an absent/empty training partition;
 - `load_labels` behavior and independence from `test_flag`;
+- reusable producer construction and typed `PreprocessedCase`/`LabeledPreprocessedCase` contracts;
+- independent native-label and transformed-label geometry validation;
 - socket-slug to canonical raw-key binding validation;
 - image read/write validation.
 - required `nnunet.export_space` composition and fixed-vocabulary validation
@@ -2298,6 +2594,9 @@ Recommended pull-request granularity is one cut per PR, except very small scaffo
 - absence of remaining `build_validation_inferer` imports/calls after Cut 4;
 - evaluation model loader and volume producer tests;
 - evaluation pipeline and threshold protocol tests;
+- one unified repository-model loop selecting the correct reference from the declared result space;
+- absence of evaluator-owned Dataset/Subset unwrapping, raw-record reconstruction, and native-only prediction orchestration;
+- equal complete-case batch-one enforcement for model and native output, independently of sliding-window window batch;
 - nnU-Net 3D conversion-config, volume-export, reopened-NIfTI, and compliant
   external-volume producer tests;
 - early-error tests for repository and nnU-Net 2D inputs at the geometry-aware
@@ -2317,6 +2616,8 @@ For a fixed model/checkpoint/input/config:
 - threshold-0.5 masks and metrics match;
 - threshold sweep selection remains stable;
 - native-space results are assessed against verified native labels;
+- model-space and native-space evaluation consume the same typed preprocessed model input and predictor path;
+- a completed evidence-only full-valid-split run exercises the finalized unified evaluator, with every source-geometry exclusion named and justified;
 - evaluation of the same active inference config in native and container-test runtime profiles is numerically consistent;
 - FP16 versus FP32 differences are reported rather than assumed negligible.
 
@@ -2410,7 +2711,7 @@ A dirty worktree does not automatically prohibit development builds, but competi
 ### 28.2 Training/evaluation/deployment drift
 
 **Risk:** Three implementations slowly diverge.
-**Mitigation:** One shared `src/models` lifecycle implementation, one `src/inference` predictor/orchestration path, and registered loader-stack preprocessing adapters reused by every consumer; training and evaluation retain only their assessment/orchestration responsibilities. Compatibility wrappers exist only at demonstrated legacy boundaries, not around the removed internal validation inferer.
+**Mitigation:** One shared `src/models` lifecycle implementation, one `src/inference` predictor/orchestration path, registered loader-stack preprocessing adapters, and one typed evaluation-case producer reused across both repository-model result spaces; training and evaluation retain only their assessment/orchestration responsibilities. Compatibility wrappers exist only at demonstrated legacy boundaries, not around the removed internal validation inferer.
 
 ### 28.3 Container configuration overrides the trained model
 
@@ -2524,6 +2825,24 @@ A later 2D compliance task must define typed parent/model geometry, slice axis
 and placement, context-centre semantics, and an invertible reconstruction trace
 with world-coordinate tests.
 
+### 28.22 Rich native metadata inflates every training batch
+
+**Risk:** Solving post-training native evaluation by adding raw records, untouched native labels, source NIfTIs, and full spatial traces to the ordinary training dataset item increases I/O, collation complexity, host memory, and worker-transfer costs for a training path that does not consume them.
+
+**Mitigation:** Preserve the established lightweight training tuple. Cut 7B introduces a separate `LabeledPreprocessedCase` producer used only by post-training evaluation, diagnostics, and other consumers that explicitly require the rich payload.
+
+### 28.23 Evaluator reconstructs cases behind the DataLoader contract
+
+**Risk:** A native-only helper reaches through `dataloader.dataset`, unwraps `Subset`, resolves dataset records and paths, rebuilds preprocessing, and diverges from the model-space loop. It may work for one loader shape while silently coupling evaluation to training internals and duplicating scientific behavior.
+
+**Mitigation:** Cut 7A exposes normalized validation records without constructing the training loader stack; Cut 7B turns them into typed rich cases; Cut 7D removes evaluator-owned record resolution and makes both spaces consume one typed prediction loop.
+
+### 28.24 Complete-case batching is confused with sliding-window batching
+
+**Risk:** An error describing `val_batch_size=1` as a native-space or GC-only rule suggests that native Python evaluation can process only one case per job, or leads users to reduce window throughput unnecessarily.
+
+**Mitigation:** Enforce one complete case at a time for geometry-aware post-training 3D evaluation in both spaces, explain that a job may iterate the full split, and keep `inference.sliding_window.sw_batch_size` as the independent control for windows within the current case.
+
 ---
 
 ## 29. Definition of done for this CAP
@@ -2544,6 +2863,9 @@ This CAP is complete only when all of the following are true:
 - [ ] ISLES24 and ISLES26 deterministic preprocessing are registered by saved `dataset.id` and shared by labeled native workflows and label-free inference without container-side transform copies.
 - [ ] Dataset constructors default to `load_labels=True`; blind inference explicitly uses `False`; `test_flag` remains independent; and no dummy label is created.
 - [ ] Native metadata is captured separately for every case and raw modality before preprocessing/channel merging, with sufficient geometry and trace for restoration.
+- [ ] Post-training 3D evaluation discovers normalized validation records without constructing ordinary training datasets, DataLoaders, samplers, augmentation pipelines, workers, or requiring a non-empty training partition.
+- [ ] `LabeledPreprocessedCase` provides one explicit rich boundary containing model input, trace, native input metadata, transformed model-space label/geometry, and untouched native label/geometry; label-free `PreprocessedCase` remains free of placeholder labels.
+- [ ] Ordinary training and training-validation dataset items retain their lightweight established tuple contract.
 - [ ] Every supported 3D nnU-Net conversion preset declares
   `nnunet.export_space`; native-grid declarations are verified, transformed
   tensors are written with transformed geometry, and existing source/export
@@ -2556,6 +2878,11 @@ This CAP is complete only when all of the following are true:
   certified.
 - [ ] The builder/runtime is dataset-agnostic across registered repository adapters and fails clearly for an unavailable adapter.
 - [ ] Native-space restoration passes shape, affine, and world-coordinate tests.
+- [ ] Repository-model post-training 3D evaluation uses one typed case/prediction loop for `model_preprocessed` and `native_input`; it contains no native-only record reconstruction, Dataset/Subset unwrapping, or duplicate restoration path.
+- [ ] Geometry-aware post-training 3D evaluation enforces one complete case at a time in both spaces while keeping sliding-window `sw_batch_size` independent and allowing a job to process an entire split sequentially.
+- [ ] During-training validation remains `model_preprocessed`; an attempted native-output request fails early and directs the user to post-training evaluation.
+- [ ] The shared medical-image writer accepts only `native_input`, writes `uint8` `{0,1}`, and passes reopened-file geometry/qform/sform validation.
+- [ ] The finalized typed producer and unified evaluator pass live model-space parity, label-free native output, heterogeneous-grid cases, known-invalid-source fail-closed checks, and one completed evidence-only full-valid-split evaluation.
 - [ ] A model tarball can be built from run-dir/checkpoint specifications and loads strictly from `/opt/ml/model/`.
 - [ ] Docker image and model artifact archive build independently and together.
 - [ ] The container implements the current Grand Challenge HTTP lifecycle and runs non-root/offline.

@@ -199,13 +199,15 @@ class TestEvaluationPipeline(unittest.TestCase):
         self.assertEqual(cfg.evaluation.input_source, "live_model")
         self.assertEqual(request.inference_runtime.profile, "gc_container_test")
 
-    def test_native_output_is_rejected_until_cut_7(self):
+    def test_native_output_request_is_accepted_after_spatial_restoration(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _make_cfg(tmp, mode="fixed")
             cfg.inference.output_space = "native_input"
 
-            with self.assertRaisesRegex(ValueError, "Cut 7"):
-                build_model_evaluation_request(cfg)
+            request = build_model_evaluation_request(cfg)
+
+        self.assertEqual(request.inference_policy.output_space, "native_input")
+        self.assertEqual(request.inference_runtime.profile, "native")
 
     def test_submission_runtime_rejects_labeled_evaluation(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -7,10 +7,12 @@ from dataclasses import dataclass
 from typing import Any, ContextManager, Mapping, Optional
 
 import torch
+from monai.data import MetaTensor
 from omegaconf import DictConfig
 
 from src.inference.contracts import (
-    InvalidInferencePolicyError,
+    PredictionResult,
+    PreprocessedCase,
     ProbabilityPredictor,
     UnsupportedModelError,
 )
@@ -21,6 +23,7 @@ from src.inference.predictors import (
     validate_predictor_capabilities,
 )
 from src.inference.sliding_window import predict_sliding_window_probabilities
+from src.inference.spatial import restore_probability_to_native, threshold_probability
 
 
 @dataclass(frozen=True)
@@ -38,11 +41,6 @@ class ModelProbabilityExecutor:
                 f"Predictor does not support requested precision {self.policy.precision!r}; "
                 f"supported={capabilities.supported_precisions}."
             )
-        if self.policy.output_space != "model_preprocessed":
-            raise InvalidInferencePolicyError(
-                "Cut 4 produces model_preprocessed probabilities only. "
-                "output_space='native_input' requires Cut 7 spatial restoration."
-            )
 
     def __call__(
         self,
@@ -50,6 +48,7 @@ class ModelProbabilityExecutor:
         progress_label: Optional[str] = None,
         show_window_progress: bool = True,
     ) -> torch.Tensor:
+        """Return model/preprocessed-grid probabilities for the supplied tensor."""
         with torch.inference_mode(), _autocast_context(
             conditioned_image,
             self.policy.precision,
@@ -80,6 +79,76 @@ def build_model_probability_executor(
     )
 
 
+def predict_preprocessed_case(
+    executor: ModelProbabilityExecutor,
+    case: PreprocessedCase,
+    *,
+    progress_label: Optional[str] = None,
+    show_window_progress: bool = True,
+) -> PredictionResult:
+    """Execute one prepared 3D case and return a truthfully declared output grid."""
+    if not isinstance(executor, ModelProbabilityExecutor) and not (
+        callable(executor)
+        and hasattr(executor, "policy")
+        and hasattr(executor, "policy_source")
+    ):
+        raise TypeError("executor must satisfy the ModelProbabilityExecutor interface.")
+    if not isinstance(case, PreprocessedCase):
+        raise TypeError("case must be a PreprocessedCase.")
+
+    model_probability = executor(
+        case.image,
+        progress_label=progress_label or case.case_id,
+        show_window_progress=show_window_progress,
+    )
+    output_space = executor.policy.output_space
+    if output_space == "native_input":
+        probability = restore_probability_to_native(
+            model_probability,
+            case.spatial_trace,
+        )
+        restoration_applied = case.spatial_trace.model != case.spatial_trace.original
+    else:
+        model_probability_tensor = (
+            model_probability.as_tensor()
+            if isinstance(model_probability, MetaTensor)
+            else model_probability
+        )
+        probability = model_probability_tensor.detach().to(
+            device="cpu",
+            dtype=torch.float32,
+        )
+        restoration_applied = False
+
+    mask = threshold_probability(probability, executor.policy.decision.threshold)
+    return PredictionResult(
+        probability=probability,
+        mask=mask,
+        output_space=output_space,
+        spatial_trace=case.spatial_trace,
+        native_reference=(
+            case.native_metadata[case.reference_key]
+            if case.reference_key is not None
+            else None
+        ),
+        provenance={
+            "case_id": case.case_id,
+            "inference_policy_source": str(executor.policy_source),
+            "threshold": float(executor.policy.decision.threshold),
+            "spatial_restoration": {
+                "applied": restoration_applied,
+                "interpolation": "continuous_linear" if restoration_applied else None,
+                "source_shape": list(case.spatial_trace.model.shape),
+                "output_shape": list(
+                    case.spatial_trace.original.shape
+                    if output_space == "native_input"
+                    else case.spatial_trace.model.shape
+                ),
+            },
+        },
+    )
+
+
 def _autocast_context(
     conditioned_image: torch.Tensor,
     precision: str,
@@ -104,4 +173,5 @@ def _autocast_context(
 __all__ = [
     "ModelProbabilityExecutor",
     "build_model_probability_executor",
+    "predict_preprocessed_case",
 ]

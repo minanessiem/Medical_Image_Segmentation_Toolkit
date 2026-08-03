@@ -3,9 +3,11 @@ Tests for live-model 3D volume IO producer.
 """
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import torch
 import torch.nn as nn
 from monai.data import MetaTensor
@@ -16,6 +18,13 @@ from scripts.evaluation.io.model_volumes import (
     iter_model_volume_samples,
     resolve_batch_item_identity,
     validate_model_evaluation_mode,
+)
+from src.inference.contracts import (
+    LabeledPreprocessedCase,
+    NativeImageMetadata,
+    PreprocessedCase,
+    SpatialGeometry,
+    SpatialTrace,
 )
 
 
@@ -30,6 +39,7 @@ class DummyExecutor:
         self.policy = SimpleNamespace(
             output_space="model_preprocessed",
             precision="fp32",
+            decision=SimpleNamespace(threshold=0.5),
         )
         self.policy_source = "explicit_top_level"
 
@@ -182,6 +192,115 @@ class TestModelVolumeIO(unittest.TestCase):
 
         self.assertEqual(len(samples), 1)
         self.assertEqual(samples[0].case_id, "case_a")
+
+    def test_native_output_uses_case_aware_preprocessing_and_native_label(self):
+        cfg = _base_cfg(diffusion_type="Discriminative", dim="3d")
+        cfg.inference = OmegaConf.create(
+            {
+                "output_space": "native_input",
+                "precision": "fp32",
+                "sliding_window": {
+                    "enabled": False,
+                    "roi_size": [2, 2, 2],
+                    "sw_batch_size": 1,
+                    "overlap": 0.5,
+                    "blend_mode": "gaussian",
+                    "padding_mode": "constant",
+                },
+                "decision": {"threshold": 0.5},
+            }
+        )
+        cfg.dataset.id = "isles26"
+        cfg.dataset.modalities = ["T1_RAW"]
+        cfg.validation.val_batch_size = 1
+        native_affine = np.array(
+            [
+                [-1.0, 0.0, 0.0, 7.0],
+                [0.0, 2.0, 0.0, -3.0],
+                [0.0, 0.0, 1.5, 4.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        model_geometry = SpatialGeometry.identity((2, 2, 2))
+        native_geometry = SpatialGeometry(
+            shape=(3, 4, 5),
+            affine=tuple(tuple(float(value) for value in row) for row in native_affine),
+            spacing=(1.0, 2.0, 1.5),
+            orientation="LAS",
+        )
+        native_metadata = NativeImageMetadata(
+            canonical_key="T1",
+            shape=native_geometry.shape,
+            dtype="float32",
+            affine=native_geometry.affine,
+            spacing=native_geometry.spacing,
+            orientation=native_geometry.orientation,
+            qform=native_geometry.affine,
+            sform=native_geometry.affine,
+            qform_code=1,
+            sform_code=1,
+            source_reference="synthetic",
+        )
+        case = PreprocessedCase(
+            case_id="native-case",
+            image=MetaTensor(torch.zeros((1, 1, 2, 2, 2)), affine=torch.eye(4)),
+            spatial_trace=SpatialTrace(
+                original=native_geometry,
+                model=model_geometry,
+                transform_history=(
+                    {"class": "SpatialResample", "do_transforms": True},
+                ),
+            ),
+            native_metadata={"T1": native_metadata},
+            reference_key="T1",
+        )
+        labeled = LabeledPreprocessedCase(
+            case=case,
+            model_label=torch.zeros((1, 1, 2, 2, 2)),
+            native_label=torch.ones((1, 1, 3, 4, 5)),
+            native_label_metadata=replace(native_metadata, canonical_key="label"),
+        )
+        dataloader = SimpleNamespace(
+            dataset=SimpleNamespace(
+                database=[
+                    {
+                        "caseID": "native-case",
+                        "T1": ["t1.nii.gz"],
+                        "label": "label.nii.gz",
+                    }
+                ]
+            ),
+            batch_size=1,
+        )
+        native_executor = DummyExecutor(0.75)
+        native_executor.policy.output_space = "native_input"
+
+        with patch(
+            "scripts.evaluation.io.model_volumes.build_model_probability_executor",
+            return_value=native_executor,
+        ), patch(
+            "scripts.evaluation.io.model_volumes.preprocess_case",
+            return_value=labeled,
+        ) as preprocess_mock:
+            samples = list(
+                iter_model_volume_samples(
+                    model=DummyModel(),
+                    dataloader=dataloader,
+                    cfg=cfg,
+                    device="cpu",
+                    show_progress=False,
+                )
+            )
+
+        preprocess_mock.assert_called_once()
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0].prediction_space, "native_input")
+        self.assertEqual(samples[0].reference_space, "native_input")
+        self.assertEqual(tuple(samples[0].prediction_volume.shape), (1, 3, 4, 5))
+        self.assertEqual(tuple(samples[0].ground_truth_volume.shape), (1, 3, 4, 5))
+        self.assertEqual(samples[0].prediction_geometry, native_geometry)
+        self.assertEqual(samples[0].reference_geometry, native_geometry)
+        self.assertTrue(samples[0].metadata["spatial_restoration_applied"])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,6 @@ from unittest.mock import patch
 import torch
 
 from src.inference.contracts import (
-    InvalidInferencePolicyError,
     InvalidPredictionError,
     PredictorCapabilities,
     UnsupportedModelError,
@@ -180,15 +179,22 @@ class TestModelProbabilityExecutor(unittest.TestCase):
                         show_window_progress=False,
                     )
 
-    def test_native_output_fails_until_spatial_restoration_cut(self):
+    def test_native_output_policy_is_accepted_by_model_space_executor(self):
         predictor = FunctionPredictor(lambda image: torch.full_like(image[:, :1], 0.5))
 
-        with self.assertRaisesRegex(InvalidInferencePolicyError, "Cut 7"):
-            ModelProbabilityExecutor(
-                predictor=predictor,
-                policy=_policy(output_space="native_input"),
-                policy_source="explicit_top_level",
-            )
+        executor = ModelProbabilityExecutor(
+            predictor=predictor,
+            policy=_policy(output_space="native_input"),
+            policy_source="explicit_top_level",
+        )
+
+        probability = executor(
+            torch.zeros((1, 1, 4, 4, 4)),
+            show_window_progress=False,
+        )
+
+        self.assertEqual(tuple(probability.shape), (1, 1, 4, 4, 4))
+        self.assertEqual(executor.policy.output_space, "native_input")
 
     def test_selected_precision_must_be_supported_by_predictor(self):
         predictor = FunctionPredictor(
