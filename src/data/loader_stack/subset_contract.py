@@ -87,6 +87,7 @@ def resolve_subset_contract(
     subsets: Any,
     active_subsets: Any,
     fold_value: Any | None,
+    required_roles: Sequence[str] = ("train", "val", "sample"),
 ) -> tuple[str, dict[str, dict[str, tuple[Any, ...]]], dict[str, str]]:
     """
     Validate and normalize dataset subset contract.
@@ -144,11 +145,26 @@ def resolve_subset_contract(
     active_subset_mapping = _coerce_mapping(
         active_subsets, field_name="dataset.active_subsets"
     )
+    if isinstance(required_roles, str) or not isinstance(required_roles, Sequence):
+        raise ValueError("required_roles must be a non-empty sequence of role names.")
+    normalized_required_roles = tuple(
+        dict.fromkeys(str(role).strip() for role in required_roles)
+    )
+    if not normalized_required_roles or any(
+        not role for role in normalized_required_roles
+    ):
+        raise ValueError("required_roles must contain non-empty role names.")
+
     normalized_active_subsets: dict[str, str] = {}
-    for role in ("train", "val", "sample"):
+    for role in normalized_required_roles:
         if role not in active_subset_mapping:
+            if normalized_required_roles == ("train", "val", "sample"):
+                raise ValueError(
+                    "dataset.active_subsets must define train, val, and sample keys. "
+                    f"Missing: {role}"
+                )
             raise ValueError(
-                "dataset.active_subsets must define train, val, and sample keys. "
+                "dataset.active_subsets must define every requested subset role. "
                 f"Missing: {role}"
             )
         subset_ref = str(active_subset_mapping[role]).strip()
@@ -228,4 +244,3 @@ def describe_subset_selector(
             return f"{subset_name}: fold_in={list(selector['fold_in'])}"
         return f"{subset_name}: fold_not_in={list(selector['fold_not_in'])}"
     return f"{subset_name}: split_in={list(selector['split_in'])}"
-

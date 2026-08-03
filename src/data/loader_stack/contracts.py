@@ -25,6 +25,10 @@ class InvalidCaseRecordError(DatasetPreprocessingError):
     """A dataset record violates its explicit image/label contract."""
 
 
+class CaseRecordSourceError(DatasetPreprocessingError):
+    """Validation-only case-record discovery could not satisfy its contract."""
+
+
 SUPPORTED_LOADER_MODES = (
     "online_slices_3d_to_2d",
     "nnunet_slices_2d",

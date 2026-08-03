@@ -22,6 +22,7 @@ class DatasetCapabilities:
     loader_module: str
     implementation_state: str
     preprocessing_adapter_factory: str | None = None
+    case_record_reader: str | None = None
 
 
 DEFAULT_DATASET_REGISTRY: dict[str, DatasetCapabilities] = {
@@ -39,6 +40,7 @@ DEFAULT_DATASET_REGISTRY: dict[str, DatasetCapabilities] = {
         preprocessing_adapter_factory=(
             "src.data.loader_stack.isles24_loader:build_preprocessing_adapter"
         ),
+        case_record_reader="src.data.loader_stack.isles24_loader:read_case_records",
     ),
     # ISLES26 supports online slices, full volumes, and random volume patches.
     "isles26": DatasetCapabilities(
@@ -54,6 +56,7 @@ DEFAULT_DATASET_REGISTRY: dict[str, DatasetCapabilities] = {
         preprocessing_adapter_factory=(
             "src.data.loader_stack.isles26_loader:build_preprocessing_adapter"
         ),
+        case_record_reader="src.data.loader_stack.isles26_loader:read_case_records",
     ),
 }
 

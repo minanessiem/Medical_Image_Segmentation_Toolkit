@@ -758,13 +758,23 @@ def _read_normalized_records(
                 f"ISLES26 datalist entry at index {index} must be a mapping, "
                 f"got: {type(record).__name__}."
             )
-        normalized_records.append(
-            _normalize_case_record(
+        try:
+            normalized_record = _normalize_case_record(
                 record=record,
                 basedir=basedir_path,
                 load_labels=load_labels,
             )
-        )
+        except InvalidCaseRecordError as exc:
+            raise InvalidCaseRecordError(
+                "ISLES26 datalist record failed validation "
+                f"(index={index}, caseID={record.get('caseID')!r}): {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise ValueError(
+                "ISLES26 datalist record failed normalization "
+                f"(index={index}, caseID={record.get('caseID')!r}): {exc}"
+            ) from exc
+        normalized_records.append(normalized_record)
     return normalized_records
 
 
@@ -806,6 +816,28 @@ def datafold_read(
         partitioning=str(partitioning).strip().lower(),
         subset_name=requested_subset,
         subset_definitions=normalized_subset_definitions,
+    )
+
+
+def read_case_records(
+    *,
+    datalist: str,
+    basedir: str,
+    subset_name: str,
+    partitioning: str,
+    subset_definitions: Mapping[str, Mapping[str, tuple[Any, ...]]],
+    fold_value: Any | None = None,
+    load_labels: bool = True,
+) -> list[dict[str, Any]]:
+    """Read one normalized ISLES26 subset without constructing a Dataset."""
+    del fold_value
+    return datafold_read(
+        datalist=datalist,
+        basedir=basedir,
+        subset_name=subset_name,
+        partitioning=partitioning,
+        subset_definitions=subset_definitions,
+        load_labels=load_labels,
     )
 
 
@@ -1397,6 +1429,7 @@ __all__ = [
     "_normalize_modalities",
     "_normalize_case_record_paths",
     "datafold_read",
+    "read_case_records",
     "ISLES26Dataset3D",
     "ISLES26RandomPatches3D",
     "ISLES26Dataset2D",

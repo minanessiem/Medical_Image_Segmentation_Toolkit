@@ -6,6 +6,7 @@ Runtime behavior remains sourced from `src.data.loaders`.
 """
 
 from src.data.loader_stack.contracts import (
+    CaseRecordSourceError,
     DatasetPreprocessingError,
     InvalidCaseRecordError,
     LabelRequiredError,
@@ -23,6 +24,7 @@ from src.data.loader_stack.registry import (
     DatasetCapabilities,
     get_dataset_capabilities,
 )
+from src.data.loader_stack.record_source import CaseRecord, load_case_records
 from src.data.loader_stack.preprocessing import (
     DatasetPreprocessingAdapter,
     get_preprocessing_adapter,
@@ -31,6 +33,7 @@ from src.data.loader_stack.preprocessing import (
 __all__ = [
     "SUPPORTED_LOADER_MODES",
     "DatasetPreprocessingError",
+    "CaseRecordSourceError",
     "InvalidCaseRecordError",
     "LabelRequiredError",
     "PreprocessingAdapterError",
@@ -44,4 +47,6 @@ __all__ = [
     "DatasetPreprocessingAdapter",
     "get_preprocessing_adapter",
     "get_dataset_capabilities",
+    "CaseRecord",
+    "load_case_records",
 ]

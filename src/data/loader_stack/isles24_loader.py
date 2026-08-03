@@ -232,17 +232,20 @@ def datafold_read(
 
     json_data = json_data[key]
     normalized_records = []
-    for raw_record in json_data:
+    for index, raw_record in enumerate(json_data):
         if not isinstance(raw_record, Mapping):
             raise InvalidCaseRecordError(
-                "ISLES24 datalist entries must be mappings."
+                f"ISLES24 datalist entry at index {index} must be a mapping."
             )
         d = dict(raw_record)
         if "caseID" not in d:
-            raise InvalidCaseRecordError("ISLES24 record is missing required key 'caseID'.")
+            raise InvalidCaseRecordError(
+                f"ISLES24 record at index {index} is missing required key 'caseID'."
+            )
         if load_labels and not LoaderDataUtils.is_non_empty(d.get("label")):
             raise InvalidCaseRecordError(
-                "ISLES24 record requires a non-empty 'label' path when load_labels=True."
+                "ISLES24 record requires a non-empty 'label' path when "
+                f"load_labels=True (index={index}, caseID={d.get('caseID')!r})."
             )
         if not load_labels:
             d.pop("label", None)
@@ -286,6 +289,28 @@ def datafold_read(
         partitioning=str(partitioning).strip().lower(),
         subset_name=str(subset_name).strip(),
         subset_definitions=normalized_subset_definitions,
+    )
+
+
+def read_case_records(
+    *,
+    datalist: str,
+    basedir: str,
+    subset_name: str,
+    partitioning: str,
+    subset_definitions: Mapping[str, Mapping[str, tuple[Any, ...]]],
+    fold_value: Any | None = None,
+    load_labels: bool = True,
+) -> list[dict[str, Any]]:
+    """Read one normalized ISLES24 subset without constructing a Dataset."""
+    return datafold_read(
+        datalist=datalist,
+        basedir=basedir,
+        fold=0 if fold_value is None else int(fold_value),
+        subset_name=subset_name,
+        partitioning=partitioning,
+        subset_definitions=subset_definitions,
+        load_labels=load_labels,
     )
 
 
@@ -1169,6 +1194,7 @@ def build_preprocessing_adapter():
 
 __all__ = [
     "datafold_read",
+    "read_case_records",
     "ISLES24Dataset3D",
     "ISLES24RandomPatches3D",
     "ISLES24Dataset2D",
