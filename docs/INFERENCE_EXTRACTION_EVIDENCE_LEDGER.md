@@ -14,10 +14,12 @@ probability-execution contracts, and E012 records its real-model Desktop FP32
 parity together with the unresolved FP16 finding. E013 records the accepted
 Cut-5 nnU-Net precursor, and E014 records the accepted Cut 5 evaluator and its
 live repository-model/nnU-Net evidence. E015 records the Cut 6 training-
-validation config migration and live shared-predictor validation. E002-E006 and E008 are retained only
-as compact supersession records because they do not represent accepted current
-designs. E016 records the current Cut 7 native-restoration evidence; its
-implementation remains pending user review and cut acceptance.
+validation config migration and live shared-predictor validation. E002-E006
+and E008 are retained only as compact supersession records because they do not
+represent accepted current designs. E016 retains the exploratory,
+pre-decomposition Cut 7 restoration evidence. E017 records the completed Cut
+7E verification of the finalized Cut 7A-7D architecture and awaits
+supervisory review.
 
 ## Operating rule
 
@@ -1629,7 +1631,7 @@ the corresponding evidence to be rerun.
 | Field | Value |
 |---|---|
 | Evidence ID | `E016` |
-| Status | `RECORDED`; implementation acceptance remains pending Cut 7 review |
+| Status | `HISTORICAL`; superseded by E017 for the finalized Cut 7 architecture |
 | Base commit | `0d9ae4460133f785b97d338e31af75e6312cdf55` plus the uncommitted Cut 7 diff |
 | Environment | Desktop WSL `MedSegDiff_env`, MONAI 1.5.0, NVIDIA GeForce RTX 4070 Ti SUPER with 16,376 MiB |
 
@@ -1832,7 +1834,8 @@ All E016 artifacts remain outside Git under:
 
 ### Acceptance scope and invalidation
 
-E016 establishes on the pinned Desktop snapshot that Cut 7 restores floating
+E016 established on its pinned Desktop snapshot that the exploratory Cut 7
+implementation restored floating
 probabilities before thresholding; uses the case-specific T1 reference rather
 than a dataset-wide geometry; preserves the original shape, affine,
 orientation, qform/sform and codes; writes only validated native `uint8`
@@ -1850,7 +1853,284 @@ the follow-up establishes case-path coverage for every otherwise-valid
 The blind label-free result is not blocked by O007. Changes to preprocessing,
 spatial trace capture, interpolation conventions, threshold ordering, NIfTI
 materialization, the pinned model/input, or relevant MONAI/nibabel behavior
-require the corresponding evidence to be rerun.
+require the corresponding evidence to be rerun. E016 does not certify the
+post-decomposition typed producer and unified evaluator; E017 replaces that
+acceptance role while retaining E016 as the discovery record that motivated
+Cuts 7A-7D.
+
+---
+
+## Evidence item E017: Finalized Cut 7A-7E typed native-restoration milestone
+
+### Status and question
+
+| Field | Value |
+|---|---|
+| Evidence ID | `E017` |
+| Status | `PASS`; Cut 7E evidence is complete and pending supervisory review/commit |
+| Base commit | `b9b734db3fe5ee22934da955806819025b5715cf` |
+| Environment | Desktop WSL `MedSegDiff_env`, NVIDIA GeForce RTX 4070 Ti SUPER, FP32 |
+
+E017 asks whether the architecture finalized by Cuts 7A-7D, rather than the
+superseded exploratory native-volume helper, can use one typed preprocessing
+producer and the shared predictor for both model-preprocessed and native-input
+output policies; preserve the accepted probability baseline; write a valid
+label-free native NIfTI; fail closed on known source-grid violations; and
+complete one evaluation over every other `val_full` case through the unified
+Cut 7D evaluator.
+
+### Pinned code, model, config, and input state
+
+All evidence was generated from a clean tracked worktree at exact commit
+`b9b734db3fe5ee22934da955806819025b5715cf`. The non-versioned worktree and
+durable artifacts remain at:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut7e_20260803a/
+```
+
+The live runs used the pinned p5n1 DynUNet run and its complete saved config:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut5_20260802a/
+  cut5_live_artifacts/pinned_p5n1/
+```
+
+The selected checkpoint was
+`best_model_step_040000_dice_3d_0.5724.pth`, SHA-256
+`120c93ee6a32f79829bf8a6b2d3ab7db59861f865ad1e8a37889f87ab0c82441`.
+The four-case parity/model-space replay used the accepted focused split from
+E014. The complete native replay derived an evidence-only split from:
+
+```text
+isles26_nested_15_5_best_2026-07-28.json
+349f890a1d64e578b7ac258668d903a4b7861899cf64ab6f215b62d85825576b
+
+cut7e_valid191_split.json
+77607ad4d25ac31d6d82c07fe86693db39ab764df99284952003fab094ad03d4
+```
+
+The source split contains 193 validation records. The derived split preserves
+the loader-compatible structure, selects 191 unique validation records, and
+excludes exactly `sub-r065s005` and `sub-r069s031`. Neither the source split nor
+patient data was modified or added to Git.
+
+### Execution environment and commands
+
+The Desktop environment reported Python 3.10.12, PyTorch 2.8.0+cu128 (CUDA
+12.8), MONAI 1.5.0, nibabel 5.3.2, NumPy 1.26.4, and OmegaConf 2.3.0. CUDA was
+available on an NVIDIA GeForce RTX 4070 Ti SUPER with 17,170,956,288 bytes of
+device memory. This host establishes scientific and spatial behavior only; it
+is not the AWS T4 or Grand Challenge runtime.
+
+The committed-state regression commands were:
+
+```bash
+python -m unittest discover -s tests -p 'test_inference_*.py' -v
+python -m unittest discover -s tests -p 'test_evaluation_*.py' -v
+python -m unittest \
+  tests.test_training_validation_inference \
+  tests.test_training_inference_config_migration \
+  tests.test_loader_stack_record_source \
+  tests.test_nnunet_volume_spatial_contract \
+  tests.test_nnunet_precursor_config \
+  tests.test_nnunet_converter_affine \
+  tests.test_nnunet_converter_roundtrip -v
+```
+
+They passed 74/74 inference tests, 149/149 evaluation tests, and 27/27
+training/config/record-source/nnU-Net integration tests. The combined log
+SHA-256 is
+`fc201752fe5b09a0f75baa39293aafd2f6ae3b42ae300e05c3df25fcb869318d`.
+
+The public evaluator was invoked with the pinned run directory and checkpoint,
+`data_mode=full_volumes_3d`, `dataset.active_subsets.val=val_full`, zero
+validation workers, `validation.val_batch_size=1`, FP32, and either
+`inference=sliding_window_model_space` or
+`inference=sliding_window_native`. The four-case model-space replay retained
+the accepted baseline `inference.sliding_window.sw_batch_size=4`; the complete
+native replay used the native profile's batch-one sliding-window policy. The
+full native command selected `cut7e_valid191_split.json` and wrote to
+`cut7e_valid191_native_evaluation/`. Disposable evidence scripts performed
+split auditing, earliest-representation hash comparison, label-free writing,
+and post-run artifact verification; they are not production interfaces and
+remain outside Git.
+
+The two public evaluator invocations were:
+
+```bash
+python -u -m scripts.evaluation.evaluate_model \
+  evaluation.run_dir=/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut5_20260802a/cut5_live_artifacts/pinned_p5n1 \
+  evaluation.model_name=best_model_step_040000_dice_3d_0.5724 \
+  evaluation.output_dir=/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut7e_20260803a/cut7e_model_space_evaluation \
+  evaluation.device=cuda:0 \
+  data_mode=full_volumes_3d \
+  environment.dataset.data_root=/mnt/c/Users/minanessiem/Development/isles26_combined/atlas21_training_raw/Training_Raw \
+  environment.dataset.split_file=/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut5_20260802a/cut5_live_artifacts/focused_split.json \
+  dataset.active_subsets.val=val_full \
+  data_runtime.num_valid_workers=0 \
+  validation=sliding_window_3d_metrics_subset \
+  validation.val_batch_size=1 \
+  inference=sliding_window_model_space \
+  inference.precision=fp32 \
+  inference.sliding_window.sw_batch_size=4
+
+python -u -m scripts.evaluation.evaluate_model \
+  evaluation.run_dir=/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut5_20260802a/cut5_live_artifacts/pinned_p5n1 \
+  evaluation.model_name=best_model_step_040000_dice_3d_0.5724 \
+  evaluation.output_dir=/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut7e_20260803a/cut7e_valid191_native_evaluation \
+  evaluation.device=cuda:0 \
+  data_mode=full_volumes_3d \
+  environment.dataset.data_root=/mnt/c/Users/minanessiem/Development/isles26_combined/atlas21_training_raw/Training_Raw \
+  environment.dataset.split_file=/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut7e_20260803a/cut7e_valid191_split.json \
+  dataset.active_subsets.val=val_full \
+  data_runtime.num_valid_workers=0 \
+  validation=sliding_window_3d_metrics_subset \
+  validation.val_batch_size=1 \
+  inference=sliding_window_native \
+  inference.precision=fp32
+```
+
+### Shared model-grid probability and model-space evaluation
+
+One reusable typed producer yielded the same preprocessed case tensor to the
+same prepared predictor under both output policies. Across `sub-r004s006`,
+`sub-r035s015`, `sub-r041s108`, and `sub-r049s033`:
+
+- every model-policy probability hash exactly matched the corresponding
+  native-policy probability hash at their shared model-grid executor boundary;
+- all four hashes exactly matched the accepted Cut 6 baseline digests;
+- both policies reported `explicit_top_level` as their policy source; and
+- the replay completed in 16.835 seconds.
+
+The finalized Cut 7D public evaluator then completed the same four records in
+`model_preprocessed` space and wrote the canonical report set. Its fixed 0.5
+threshold mean Dice was `0.516579`; this metric is recorded as an execution
+result, while the earlier probability hashes are the stronger parity boundary.
+
+```text
+cut7e_model_probability_parity.json
+29d7494f0fb372a1a323875e68a1e625ec38f03dee7cb2c1edecbcdecf3229d5
+
+cut7e_model_probability_parity.log
+b1b2428d58983f5b4b0c116ba39d6a8cbe0cb37034dbb668014a5321e1f8d0ab
+
+cut7e_model_space_evaluation/canonical_results.json
+9b69e6deabb99bdb116a07ad2c564044fc1a596bca146c8e8ecc5f9b137d4ef
+
+cut7e_model_space_evaluation.log
+2af2d5ab4672a1f3a7e38ba00b8c8fdd4fadfafb047fe0028f5236ac29f4b79c
+```
+
+### Label-free native-output validation
+
+Case `sub-r035s015` was loaded from a record containing no label. The shared
+producer and predictor inferred on the model grid, restored the floating
+probability, thresholded in `native_input` space, and wrote
+`segmentation.nii.gz`. Reopening the result proved exact native input shape,
+affine, qform, sform, and form codes; `uint8` dtype; and value set `{0,1}`. The
+native result has shape `[192,512,512]`, spacing
+`[0.99989998,0.5,0.5]`, and LAS orientation.
+
+Inference plus restoration took 3.930 seconds; the complete load/infer/write/
+reopen check took 8.011 seconds. Peak allocated GPU memory was 1,869,463,040
+bytes. These measurements are descriptive Desktop evidence, not a T4 resource
+certificate.
+
+```text
+cut7e_label_free_native_output/report.json
+e9a00c6bd7322aaa495a2f8caa5b0146a11495c4dd3fe05df8d2d76c85a5e081
+
+cut7e_label_free_native_output/segmentation.nii.gz
+632ca5ddc9bee3123bfbef568b16b82154507312093f306464abe95869045731
+
+cut7e_label_free_native.log
+b6d2942dbab7bb6f06881445f021743d64535fc9930e4dec90724c0c4ea4f366
+```
+
+### Invalid-source audit and completed 191-case native evaluation
+
+Before the complete run, each excluded O007 case was independently passed to
+the finalized reusable labeled-case producer. Both failed before metrics with
+`SpatialRestorationError` because the model label and image did not occupy the
+same model-space physical grid. No tolerance was weakened and neither case was
+silently resampled to obtain a complete result.
+
+```text
+cut7e_split_and_invalid_audit.json
+39553c777a88cade9d758da3d6e2252564c7b4dd9eaed2edba01ddd5bbbe0cf7
+
+cut7e_split_and_invalid_audit.log
+b773b2c577a9000ac3cab5c082c6794673ade4319faecd992beba8ab7565168
+```
+
+The single evidence-only native evaluation then completed all 191 selected
+cases through the unified Cut 7D typed-volume loop in 879 seconds. It produced
+191 unique spatial-contract samples and 191 unique per-case metric rows, with
+the exact expected case-ID set, zero unaccounted failures, and the complete
+canonical artifact set. Every prediction/reference pair declared
+`native_input`, had identical shapes and orientations, and passed the
+production `rtol=1e-5`, `atol=1e-5` affine and spacing contract. The maximum
+absolute affine-element difference was 0.0009003 mm and maximum spacing
+difference was 0.000005725 mm; the affine maximum occurs on translated
+coordinates where the contract's relative term applies (`sub-r069s032`, affine
+element `[0,3]`, `-101.6347809` versus `-101.6338806`).
+
+The first disposable post-run verifier compared serialized geometry mappings
+for exact floating-point equality and therefore rejected this valid
+prediction/reference pair after the production evaluation had completed. The
+verifier was corrected to mirror the already-enforced production tolerance,
+then passed all 191 unchanged canonical samples. No inference or evaluation
+artifact was regenerated, no source case was added, and no production
+tolerance changed.
+
+The completed selection exercises 54 native shapes, 49 spacings when rounded
+to 1e-6, LAS/PSR/RAS orientations, and 94 oblique cases. At fixed threshold
+0.5 it reported mean Dice `0.575165`, mean Surface Dice `0.522845`, and mean
+HD95 `53.768511`. These metrics confirm complete evaluator traversal but do
+not supersede the competition's eventual held-out scoring.
+
+```text
+cut7e_valid191_native_evaluation.log
+ae49ca6c789e80e068ac2b28c6efd0f8a1f0102ca7ff6e04d40c3674c6850362
+
+cut7e_valid191_native_evaluation/canonical_results.json
+6b819e1d0ff6ef8714370f27f39670e8d4b09d5940e47ac710c206e0c04fdb7c
+
+cut7e_valid191_native_evaluation/resolved_evaluation_config.yaml
+31de960935cb61a8a9764893cd4029f5d2777a833927177fddb1a50d9e7518b4
+
+cut7e_valid191_native_evaluation/volume_metrics_per_threshold.csv
+822404ed1953a3f6c4b666f013dd2a2df4449ad68edb73009fb8facd96ce4c3d
+
+cut7e_valid191_native_evaluation/per_case_threshold_metrics.csv
+7bb37b4a0ccc5da4ff18a58021082868c9b58a47bbf1885071171ccb251041d3
+
+cut7e_valid191_native_evaluation/evaluation_summary.txt
+f00e4475c8ee462e0db4da12cbed33038709dbe5159e34b0e3e7b8452526a4f5
+
+cut7e_valid191_verification.json
+84fbacc5e8492f77306086fe7f9521f589b45b93f853ccbbc51ff2656fb7b148
+```
+
+### Acceptance scope and invalidation
+
+E017 satisfies Cut 7E's Desktop evidence contract for the finalized Cuts
+7A-7D implementation: the typed producer and unified evaluator have real-model
+evidence in both output spaces; the earliest shared probability representation
+retains exact accepted parity; blind native output is a reopened, exact-grid
+binary NIfTI; heterogeneous case-specific geometry is exercised broadly; the
+two source violations fail closed; and every other `val_full` record completes
+in one audited run.
+
+E017 does not certify Docker construction, Grand Challenge socket I/O, AWS T4
+memory or timing, native FP16 (O004), 2D reconstruction (O005), LRZ `.sqsh`
+parity, or correction of the two O007 source cases. Those remain explicit
+future/release gates. Changes to the typed case producer, saved-model loading,
+probability executor, restoration/interpolation, output-space policy,
+threshold order, NIfTI writer, evaluation spatial tolerance, relevant
+MONAI/nibabel behavior, pinned checkpoint, or selected data invalidate the
+corresponding portion of E017 and require it to be rerun.
 
 ---
 
