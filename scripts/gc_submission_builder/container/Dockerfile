@@ -1,14 +1,17 @@
 FROM pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime@sha256:f894dae26e1ee8557c544f9cfdb9dc011b1552bf3c1e656b422f2e221d380e40
 
 ARG INTERFACE_MANIFEST=scripts/gc_submission_builder/configs/interfaces/isles26.yaml
+ARG GC_SOURCE_SHA256=unknown
 
-LABEL org.grand-challenge.api-method="invoke"
+LABEL org.grand-challenge.api-method="invoke" \
+      org.medseg-diffusion.source-sha256="${GC_SOURCE_SHA256}"
 
 ENV PYTHONPATH=/opt/app \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp \
     GC_MODEL_DIR=/opt/ml/model \
+    GC_SOURCE_SHA256=${GC_SOURCE_SHA256} \
     GC_INTERFACE_MANIFEST=/opt/app/interface_manifest.yaml \
     GC_RUNTIME_PROFILE=/opt/app/runtime_profiles/gc_submission.yaml
 

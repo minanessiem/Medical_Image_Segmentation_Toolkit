@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gzip
 import tempfile
 import unittest
 from pathlib import Path
+from types import MappingProxyType
 
 import nibabel as nib
 import numpy as np
@@ -13,12 +15,16 @@ import torch
 
 from scripts.gc_submission_builder.runtime.image_io import (
     ImageTransportError,
+    canonicalize_image_inputs,
     inspect_nifti_input,
     materialize_prediction_outputs,
     write_mha_prediction,
     write_nifti_prediction,
 )
-from scripts.gc_submission_builder.runtime.interfaces import OutputBinding
+from scripts.gc_submission_builder.runtime.interfaces import (
+    OutputBinding,
+    ResolvedImageInput,
+)
 from src.inference.contracts import (
     NativeImageMetadata,
     PredictionResult,
@@ -66,6 +72,18 @@ def _native_result(shape=(4, 5, 6), affine=None) -> PredictionResult:
     )
 
 
+def _resolved_image(path: Path, *, source_format: str) -> ResolvedImageInput:
+    return ResolvedImageInput(
+        slug="opaque-image-socket",
+        dataset_key="T1",
+        source_path=path.resolve(),
+        source_format=source_format,
+        source_size_bytes=path.stat().st_size,
+        observed_format_counts=MappingProxyType({source_format: 1}),
+        other_regular_file_count=0,
+    )
+
+
 class TestGcImageIo(unittest.TestCase):
     def test_inspect_nifti_input_accepts_one_finite_3d_nii_gz(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -83,6 +101,125 @@ class TestGcImageIo(unittest.TestCase):
         self.assertEqual(inspected.dtype, "float32")
         self.assertEqual(inspected.orientation, "RAS")
         self.assertEqual(inspected.spacing, (2.0, 3.0, 4.0))
+
+    def test_canonicalize_mha_preserves_voxels_and_oblique_physical_geometry(self):
+        angle = np.deg2rad(17.0)
+        direction = (
+            float(np.cos(angle)),
+            float(-np.sin(angle)),
+            0.0,
+            float(np.sin(angle)),
+            float(np.cos(angle)),
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+        array = np.arange(5 * 6 * 7, dtype=np.float32).reshape(7, 6, 5)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_path = root / "platform-generated.mha"
+            source = sitk.GetImageFromArray(array)
+            source.SetSpacing((1.25, 2.5, 3.75))
+            source.SetOrigin((-14.0, 9.0, 3.5))
+            source.SetDirection(direction)
+            sitk.WriteImage(source, str(source_path), useCompression=True)
+
+            with canonicalize_image_inputs(
+                {"T1": _resolved_image(source_path, source_format="mha")},
+                scratch_root=root,
+            ) as canonicalized:
+                canonical = canonicalized.inputs["T1"]
+                canonical_path = canonical.canonical_path
+                self.assertTrue(canonical_path.is_file())
+                self.assertTrue(canonical.converted)
+                self.assertEqual(canonical.source_inspection.shape, (5, 6, 7))
+                self.assertEqual(canonical.canonical_inspection.shape, (5, 6, 7))
+                reopened = sitk.ReadImage(str(canonical_path))
+                np.testing.assert_array_equal(sitk.GetArrayFromImage(reopened), array)
+                np.testing.assert_allclose(reopened.GetSpacing(), source.GetSpacing())
+                np.testing.assert_allclose(reopened.GetOrigin(), source.GetOrigin())
+                np.testing.assert_allclose(reopened.GetDirection(), source.GetDirection())
+
+            self.assertFalse(canonical_path.exists())
+            self.assertFalse(any(root.glob("gc-input-*")))
+
+    def test_canonicalize_uncompressed_nifti_is_lossless_and_gz_input_passes_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            array = np.arange(60, dtype=np.int16).reshape(3, 4, 5)
+            affine = np.diag([2.0, 3.0, 4.0, 1.0])
+            nii_path = root / "case.nii"
+            nii_gz_path = root / "case.nii.gz"
+            nib.save(nib.Nifti1Image(array, affine), nii_path)
+            nib.save(nib.Nifti1Image(array, affine), nii_gz_path)
+
+            with canonicalize_image_inputs(
+                {"T1": _resolved_image(nii_path, source_format="nii")},
+                scratch_root=root,
+            ) as canonicalized:
+                canonical_path = canonicalized.inputs["T1"].canonical_path
+                self.assertEqual(
+                    gzip.decompress(canonical_path.read_bytes()),
+                    nii_path.read_bytes(),
+                )
+            self.assertFalse(canonical_path.exists())
+
+            with canonicalize_image_inputs(
+                {"T1": _resolved_image(nii_gz_path, source_format="nii_gz")},
+                scratch_root=root,
+            ) as canonicalized:
+                canonical = canonicalized.inputs["T1"]
+                self.assertEqual(canonical.canonical_path, nii_gz_path.resolve())
+                self.assertFalse(canonical.converted)
+
+    def test_canonicalize_scalar_3d_tiff_preserves_grid_and_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_path = root / "platform-generated.tif"
+            array = np.arange(4 * 5 * 6, dtype=np.uint16).reshape(6, 5, 4)
+            source = sitk.GetImageFromArray(array)
+            source.SetSpacing((1.5, 2.0, 2.5))
+            source.SetOrigin((-3.0, 4.0, 5.0))
+            sitk.WriteImage(source, str(source_path))
+            platform_source = sitk.ReadImage(str(source_path))
+
+            with canonicalize_image_inputs(
+                {"T1": _resolved_image(source_path, source_format="tif")},
+                scratch_root=root,
+            ) as canonicalized:
+                canonical = canonicalized.inputs["T1"]
+                reopened = sitk.ReadImage(str(canonical.canonical_path))
+                np.testing.assert_array_equal(sitk.GetArrayFromImage(reopened), array)
+                np.testing.assert_allclose(
+                    reopened.GetSpacing(), platform_source.GetSpacing()
+                )
+                np.testing.assert_allclose(reopened.GetOrigin(), platform_source.GetOrigin())
+
+    def test_canonicalize_rejects_vector_or_non_3d_platform_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vector_path = root / "vector.mha"
+            vector = sitk.GetImageFromArray(
+                np.zeros((4, 5, 6, 2), dtype=np.float32),
+                isVector=True,
+            )
+            sitk.WriteImage(vector, str(vector_path))
+            with self.assertRaisesRegex(ImageTransportError, "scalar"):
+                with canonicalize_image_inputs(
+                    {"T1": _resolved_image(vector_path, source_format="mha")},
+                    scratch_root=root,
+                ):
+                    pass
+
+            two_d_path = root / "two-d.tif"
+            sitk.WriteImage(sitk.Image([6, 5], sitk.sitkUInt8), str(two_d_path))
+            with self.assertRaisesRegex(ImageTransportError, "must be 3D"):
+                with canonicalize_image_inputs(
+                    {"T1": _resolved_image(two_d_path, source_format="tif")},
+                    scratch_root=root,
+                ):
+                    pass
 
     def test_inspect_nifti_input_rejects_corrupt_and_4d_files(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import gzip
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -32,6 +33,7 @@ from scripts.gc_submission_builder.runtime.interfaces import (
 
 CONTAINER_BUILD_REPORT_NAME = "container_build_report.json"
 GRAND_CHALLENGE_LABEL = "org.grand-challenge.api-method"
+SOURCE_FINGERPRINT_LABEL = "org.medseg-diffusion.source-sha256"
 MODEL_WEIGHT_SUFFIXES = (".pth", ".pt", ".ckpt")
 LOCAL_INVOKE_TIMEOUT_SECONDS = 300
 
@@ -47,6 +49,7 @@ class ContainerImageInspection:
     architecture: str
     configured_user: str
     api_method: str
+    source_sha256: str
     model_payload_audited: bool
 
 
@@ -73,6 +76,7 @@ def build_container_image(config: ContainerBuildConfig) -> ContainerBuildResult:
 
     _require_config(config)
     manifest_arg = config.interface_manifest_path.relative_to(PROJECT_ROOT).as_posix()
+    source_sha256 = _build_source_sha256(config)
     _run(
         [
             "docker",
@@ -85,6 +89,8 @@ def build_container_image(config: ContainerBuildConfig) -> ContainerBuildResult:
             config.image_reference,
             "--build-arg",
             f"INTERFACE_MANIFEST={manifest_arg}",
+            "--build-arg",
+            f"GC_SOURCE_SHA256={source_sha256}",
             str(PROJECT_ROOT),
         ]
     )
@@ -99,6 +105,7 @@ def build_container_image(config: ContainerBuildConfig) -> ContainerBuildResult:
             config.dockerfile.parent / "requirements.lock"
         ),
         "interface_manifest_sha256": sha256_file(config.interface_manifest_path),
+        "source_sha256": source_sha256,
         "model_embedded": not inspection.model_payload_audited,
     }
     report_path.write_text(
@@ -122,6 +129,9 @@ def inspect_container_image(image_reference: str) -> ContainerImageInspection:
     architecture = str(image.get("Architecture", ""))
     configured_user = str(config.get("User", ""))
     api_method = str((config.get("Labels") or {}).get(GRAND_CHALLENGE_LABEL, ""))
+    source_sha256 = str(
+        (config.get("Labels") or {}).get(SOURCE_FINGERPRINT_LABEL, "")
+    )
     if architecture != "amd64":
         raise ContainerBuildError(
             f"Container architecture must be amd64, got {architecture!r}."
@@ -132,6 +142,12 @@ def inspect_container_image(image_reference: str) -> ContainerImageInspection:
         raise ContainerBuildError(
             f"Container label {GRAND_CHALLENGE_LABEL!r} must equal 'invoke'."
         )
+    if len(source_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in source_sha256
+    ):
+        raise ContainerBuildError(
+            f"Container label {SOURCE_FINGERPRINT_LABEL!r} must be a SHA-256 digest."
+        )
     _audit_image_model_payload(image_reference)
     return ContainerImageInspection(
         image_reference=image_reference,
@@ -139,6 +155,7 @@ def inspect_container_image(image_reference: str) -> ContainerImageInspection:
         architecture=architecture,
         configured_user=configured_user,
         api_method=api_method,
+        source_sha256=source_sha256,
         model_payload_audited=True,
     )
 
@@ -181,7 +198,7 @@ def test_container_image(
             network_name,
             "--read-only",
             "--memory",
-            "32g",
+            "16g",
             "--cpus",
             "8",
             "--shm-size",
@@ -226,13 +243,13 @@ def test_container_image(
             bindings=invocation.interface.outputs,
             output_root=output_root,
             input_path=(
-                next(iter(invocation.raw_modalities.values()))
-                if len(invocation.raw_modalities) == 1
+                next(iter(invocation.image_inputs.values())).source_path
+                if len(invocation.image_inputs) == 1
                 else None
             ),
         )
         geometry_matches_native_input: bool | None = None
-        if len(invocation.raw_modalities) == 1:
+        if len(invocation.image_inputs) == 1:
             geometry_matches_native_input = True
         runtime_logs = _run(
             ["docker", "logs", container_name],
@@ -284,6 +301,40 @@ def save_container_image(config: ContainerBuildConfig) -> Path:
                 shutil.copyfileobj(source, compressed, length=1024 * 1024)
         shutil.move(str(temporary_archive), str(archive_path))
     return archive_path
+
+
+def _build_source_sha256(config: ContainerBuildConfig) -> str:
+    """Fingerprint the exact repository files copied into the algorithm image."""
+
+    roots = (
+        PROJECT_ROOT / "src",
+        PROJECT_ROOT / "scripts" / "gc_submission_builder" / "runtime",
+    )
+    files = {
+        config.dockerfile,
+        config.interface_manifest_path,
+        PROJECT_ROOT / "scripts" / "gc_submission_builder" / "__init__.py",
+        PROJECT_ROOT / "scripts" / "gc_submission_builder" / "release_manifest.py",
+        config.dockerfile.parent / "requirements.lock",
+        PROJECT_ROOT / "configs" / "inference_runtime" / "gc_submission.yaml",
+        PROJECT_ROOT / "configs" / "inference_runtime" / "gc_container_test.yaml",
+    }
+    for root in roots:
+        files.update(
+            path
+            for path in root.rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix not in {".pyc", ".pyo"}
+        )
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda value: value.relative_to(PROJECT_ROOT).as_posix()):
+        relative = path.relative_to(PROJECT_ROOT).as_posix().encode("utf-8")
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def validate_single_input_nifti_output(

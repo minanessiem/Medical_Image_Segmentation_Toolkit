@@ -8,12 +8,19 @@ from pathlib import Path
 from types import SimpleNamespace
 
 try:
-    from scripts.gc_submission_builder.runtime.app import AppSettings, create_app
+    from scripts.gc_submission_builder.runtime.app import (
+        LOGGER as APP_LOGGER,
+        AppSettings,
+        create_app,
+    )
+    from scripts.gc_submission_builder.runtime.inference import GcRuntimeStageError
 except ModuleNotFoundError as exc:
     if exc.name != "fastapi":
         raise
     AppSettings = None
+    APP_LOGGER = None
     create_app = None
+    GcRuntimeStageError = None
 
 
 SETTINGS = (
@@ -77,6 +84,12 @@ def _exercise(app, requests):
 
 @unittest.skipIf(create_app is None, "FastAPI is installed in the GC image, not the host test venv")
 class TestGcApp(unittest.TestCase):
+    def test_module_execution_uses_the_configured_runtime_logger_namespace(self):
+        self.assertEqual(
+            APP_LOGGER.name,
+            "scripts.gc_submission_builder.runtime.app",
+        )
+
     def test_ready_runtime_exposes_health_200_and_invoke_201(self):
         calls = []
         runtime = SimpleNamespace(invoke=lambda **kwargs: calls.append(kwargs))
@@ -93,8 +106,12 @@ class TestGcApp(unittest.TestCase):
             raise RuntimeError("protected/model/path")
 
         app = create_app(settings=SETTINGS, initializer=fail)
-
-        health, invoke = _exercise(app, [("GET", "/health"), ("POST", "/invoke")])
+        with self.assertLogs(
+            "scripts.gc_submission_builder.runtime.app", level="INFO"
+        ) as captured:
+            health, invoke = _exercise(
+                app, [("GET", "/health"), ("POST", "/invoke")]
+            )
 
         self.assertEqual(health[:2], (503, b"NOT_READY"))
         self.assertEqual(invoke[:2], (503, b"NOT_READY"))
@@ -102,17 +119,53 @@ class TestGcApp(unittest.TestCase):
             app.state.gc_state.initialization_error_type,
             "RuntimeError",
         )
+        rendered = "\n".join(captured.output)
+        self.assertIn("GC_EVENT", rendered)
+        self.assertIn('"event":"startup_failed"', rendered)
+        self.assertNotIn("protected/model/path", rendered)
 
     def test_runtime_failure_returns_generic_http_500(self):
         def fail_invoke(**_kwargs):
             raise RuntimeError("protected/input/file.nii.gz")
 
-        runtime = SimpleNamespace(invoke=fail_invoke)
+        runtime = SimpleNamespace(invoke=fail_invoke, device=None)
         app = create_app(settings=SETTINGS, initializer=lambda **_kwargs: runtime)
-
-        (response,) = _exercise(app, [("POST", "/invoke")])
+        with self.assertLogs(
+            "scripts.gc_submission_builder.runtime.app", level="INFO"
+        ) as captured:
+            (response,) = _exercise(app, [("POST", "/invoke")])
 
         self.assertEqual(response[:2], (500, b"INFERENCE_FAILED"))
+        rendered = "\n".join(captured.output)
+        self.assertIn('"event":"invocation_failed"', rendered)
+        self.assertNotIn("protected/input/file.nii.gz", rendered)
+
+    def test_stage_failure_emits_partial_timing_and_stable_code(self):
+        cause = ValueError("protected/input/patient-file.mha")
+
+        def fail_invoke(**_kwargs):
+            raise GcRuntimeStageError(
+                stage="input_canonicalization",
+                error_code="INPUT_CANONICALIZATION_FAILED",
+                safe_detail="Grand Challenge input canonicalization did not complete.",
+                timings_seconds={"input_canonicalization_seconds": 0.25},
+                total_seconds=0.5,
+                cause=cause,
+            ) from cause
+
+        runtime = SimpleNamespace(invoke=fail_invoke, device=None)
+        app = create_app(settings=SETTINGS, initializer=lambda **_kwargs: runtime)
+        with self.assertLogs(
+            "scripts.gc_submission_builder.runtime.app", level="INFO"
+        ) as captured:
+            (response,) = _exercise(app, [("POST", "/invoke")])
+
+        self.assertEqual(response[:2], (500, b"INFERENCE_FAILED"))
+        rendered = "\n".join(captured.output)
+        self.assertIn('"failed_stage":"input_canonicalization"', rendered)
+        self.assertIn('"error_code":"INPUT_CANONICALIZATION_FAILED"', rendered)
+        self.assertIn('"input_canonicalization_seconds":0.25', rendered)
+        self.assertNotIn("patient-file", rendered)
 
 
 if __name__ == "__main__":

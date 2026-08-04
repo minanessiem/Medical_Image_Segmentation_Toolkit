@@ -2624,6 +2624,191 @@ or the pinned model/input invalidate the corresponding portion of E020.
 
 ---
 
+## Evidence item E021: Hosted MHA input failure and Cut 10B-2 correction
+
+### Status and supersession
+
+| Field | Value |
+|---|---|
+| Evidence ID | `E021` |
+| Status | `PASS` for Cut 10B-2 source, Desktop image, success/failure lifecycles, and saved archive; hosted retest pending |
+| Cut 10B checkpoint | `be4b6af833eae78ea2820f02af745085dbf59976` |
+| Hosted result | `148ccec2-c194-49fb-a5ce-4fecb46b67c7` |
+| Hosted hardware request | NVIDIA T4 16 GiB VRAM, 16 GB host memory |
+
+E021 supersedes E020's claim that the NIfTI-based Desktop lifecycle established
+ISLES26 upload readiness. It does not invalidate E020's model loading, official
+output-set, MHA output, native restoration, or external-sidecar evidence. The
+model archive remains valid because the hosted log proves that its manifest,
+config, checkpoint, predictor, dataset adapter, and production inference policy
+all initialized successfully before invocation.
+
+### Question being answered
+
+The hosted try-out asked whether the Cut 10B image accepted the actual image-kind
+transport emitted for `t1-brain-mri`. It did not. The platform invoked the
+container after successful CUDA/model startup, but the input resolver accepted
+only `.nii.gz`; it raised `InterfaceManifestError`, `/invoke` returned HTTP 500,
+and Grand Challenge expected HTTP 201. The old log exposed only the exception
+type, leaving the received suffix and failed invariant opaque.
+
+Cut 10B-2 therefore asks whether a manifest-owned image boundary can accept
+hosted scalar 3D MHA/TIFF and reusable NIfTI forms, normalize only the
+representation to `.nii.gz`, preserve the physical grid and voxels before the
+existing registered preprocessing adapter, and yield stage/resource diagnostics
+that make the next hosted upload actionable.
+
+### Pinned code state
+
+The historical Cut 10B checkpoint is commit `be4b6af`. Cut 10B-2 is being
+reviewed as a scoped uncommitted overlay in the isolated Desktop worktree:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut10b2_20260804a/
+```
+
+The overlay adds explicit image-kind `accepted_formats`/`canonical_format`
+bindings, typed resolved inputs, invocation-local canonicalization, source-grid
+output checks, structured `GC_EVENT` logging, named monotonic stage timings,
+GPU/host/scratch summaries, a copied-source SHA-256 image label, and the hosted
+16 GB smoke-test limit. It does not modify the model archive, shared predictor,
+trained preprocessing, native restoration, or threshold policy.
+
+### Pinned model/config/input state
+
+No patient data is used by the focused contracts. Synthetic tests exercise:
+
+- oblique anisotropic MHA with nonzero origin and voxel-preservation checks;
+- scalar 3D multi-page TIFF, anchored to the physical metadata actually present
+  after reopening the TIFF transport;
+- uncompressed `.nii` with byte-identical gzip decompression;
+- `.nii.gz` read-only pass-through;
+- vector MHA and two-dimensional TIFF fail-closed behavior;
+- the existing NIfTI and complete compressed-MHA output routes.
+
+The pre-serialization SimpleITK TIFF fixture requested a 2.5 mm Z spacing, while
+the reopened multi-page TIFF represented Z spacing as 1.0. This is a format/
+reader boundary fact, not a canonicalizer-induced change. The test consequently
+requires canonical NIfTI to match the TIFF actually received. MHA remains the
+nontrivial full-geometry transport fixture.
+
+### Execution environment and command
+
+The Desktop worktree uses:
+
+```bash
+source /mnt/c/Users/minanessiem/Development/MedSegDiff_env/bin/activate
+python -m unittest \
+  tests.test_gc_interfaces \
+  tests.test_gc_image_io \
+  tests.test_gc_observability \
+  tests.test_gc_runtime \
+  tests.test_gc_app \
+  tests.test_gc_container_builder -v
+```
+
+The first characterization replay exposed an incorrectly placed test helper;
+after correction, the added positive TIFF contract exposed the transport
+metadata fact described above. Final exact-source Desktop discovery completed
+67 GC tests: 62 passed and 5 were expected host skips because FastAPI is
+image-only. The same source passed those 5/5 application tests inside the built
+image. Before the final
+app/logger corrections, the unchanged inference dependencies also passed 74
+inference, 149 evaluation, and 31 selected training-validation/loader/nnU-Net/
+model-loader tests. The combined relevant matrix therefore covers 321 distinct
+test cases: 316 passed in the host environment, and its 5 skipped application
+cases passed inside the image.
+
+### Result and durable artifacts
+
+The final release-development image is:
+
+```text
+medseg-diffusion-gc:cut10b2-release-dev
+image ID:      sha256:4ce343dfe142fb2027a65f5610080d2281fc00ae10efa278de534bd188d37e25
+source SHA-256: 021621ae42f8a165c02ecca7e6fff2322582c083b1f2ed3092eaa3d77029afa2
+```
+
+Its build report proves linux/amd64, non-root `algorithm:algorithm`, API method
+`invoke`, no embedded model, the exact official-manifest hash, and the same
+source SHA in the image label and report:
+
+```text
+cut10b2_live_artifacts_20260804a/image_build_release/container_build_report.json
+6f1fff76c5c998149253ccc8d6c39819ca07b7f39692f7936cbb5e4f4495cb9e
+```
+
+The established contracts are:
+
+- official MHA and supported TIFF/NIfTI suffixes resolve without platform-name
+  dependence;
+- MHA/`.nii`/`.nii.gz` canonicalization and cleanup pass;
+- unsupported vector/2D inputs fail before preprocessing;
+- all historical NIfTI/MHA writers and complete-output transaction tests pass;
+- required timing keys and resource-summary keys are present on successful
+  invocation;
+- stable failure events exclude injected identifying filenames/paths;
+- the image build command embeds and reports a deterministic copied-source
+  SHA-256;
+- the organizer-style smoke command requests 16 GB rather than 32 GB.
+
+The external sidecar returned HTTP 201 for both hosted-style MHA and direct
+`.nii.gz` inputs. Both routes produced the same already established output
+bytes, proving that representation normalization does not perturb the shared
+prediction:
+
+```text
+stroke-lesion-segmentation/output.mha
+402c0e785a6b660a2fa7864b8513d53d3fd7490935ea9445bf3ef8c21ec24ef9
+
+lesion-probability-map/output.mha
+e147d33a831b435c46e7db010e3a61753fd0786350f3c328e2105f46e5853702
+```
+
+The MHA invocation reported 0.797 seconds total, including 0.068 seconds for
+canonicalization, 0.424 seconds for the shared prediction pipeline, and 0.208
+seconds for complete output materialization/validation. Peak CUDA allocation/
+reservation were 1,990,069,760/2,539,651,072 bytes, peak host RSS was
+1,380,544,512 bytes, and the cgroup memory limit was 17,179,869,184 bytes.
+These are Desktop RTX/synthetic-fixture observations, not T4 qualification.
+
+A malformed MHA with identifying-looking filename and metadata values returned
+the generic HTTP 500 response, emitted stage `input_canonicalization`, code
+`INPUT_CANONICALIZATION_FAILED`, completed-stage/total timings and resource
+state, logged neither protected value, and left no partial output. The bounded
+failure log is:
+
+```text
+cut10b2_live_artifacts_20260804a/failure_injection.log
+cd043100097750f22070d0653377aa3d87f858dc7c0d3fe06dd5f1cb944df5ca
+```
+
+The independently saved image archive is:
+
+```text
+cut10b2_live_artifacts_20260804a/image_export_release/medseg-diffusion-gc-cut10b2-release-dev.tar.gz
+43997c95c1e0dd9fcb11be66435b5554e7dcbd760b0c401f13130cd149af0c54
+```
+
+This archive, not the NIfTI-only Cut 10B image or either superseded intermediate
+Cut 10B-2 build, is the next hosted try-out candidate. It reuses the already
+validated model archive unchanged.
+
+### Acceptance scope and invalidation
+
+E021 closes the Cut 10B-2 Desktop boundary: source and canonical transport are
+physically equivalent; MHA and NIfTI inputs coexist; exact-source FastAPI,
+external-sidecar success, complete output validation, sanitized failure,
+structured timing/resource events, source fingerprinting, and archive export
+all pass. It does not prove T4 resource headroom, a worst-case ten-minute case,
+or a successful Grand Challenge try-out. Those remain Cut 11 and Cut 12 gates.
+
+Changes to accepted-format parsing, canonicalization, source/canonical geometry
+validation, output source-grid checks, structured logging, build fingerprinting,
+or resource limits invalidate the corresponding E021 evidence.
+
+---
+
 ## Ledger update template
 
 Use this compact structure for completed evidence:

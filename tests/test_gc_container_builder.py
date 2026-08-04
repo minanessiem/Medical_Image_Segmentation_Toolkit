@@ -50,7 +50,10 @@ def _inspection_payload(*, architecture="amd64", user="algorithm:algorithm", lab
                 "Architecture": architecture,
                 "Config": {
                     "User": user,
-                    "Labels": {"org.grand-challenge.api-method": label},
+                    "Labels": {
+                        "org.grand-challenge.api-method": label,
+                        "org.medseg-diffusion.source-sha256": "a" * 64,
+                    },
                 },
             }
         ]
@@ -128,6 +131,11 @@ class TestGcContainerBuilder(unittest.TestCase):
             "INTERFACE_MANIFEST=scripts/gc_submission_builder/configs/interfaces/isles26.yaml",
             build,
         )
+        source_arg = next(
+            value for value in build if value.startswith("GC_SOURCE_SHA256=")
+        )
+        self.assertEqual(len(source_arg.removeprefix("GC_SOURCE_SHA256=")), 64)
+        self.assertEqual(report["source_sha256"], source_arg.split("=", 1)[1])
         self.assertFalse(report["model_embedded"])
         self.assertTrue(report["image"]["model_payload_audited"])
         self.assertEqual(report["image"]["architecture"], "amd64")
@@ -259,7 +267,7 @@ class TestGcContainerBuilder(unittest.TestCase):
         run = next(command for command in commands if command[:2] == ["docker", "run"])
         self.assertEqual(run[run.index("--network") + 1], network_name)
         self.assertIn("--read-only", run)
-        self.assertIn("32g", run)
+        self.assertIn("16g", run)
         self.assertIn("8", run)
         self.assertIn("all", run)
         self.assertTrue(any(value.endswith("dst=/opt/ml/model,readonly") for value in run))

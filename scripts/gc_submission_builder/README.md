@@ -24,12 +24,25 @@ continuous probability map.
 development fixture. It proves that the same runtime can retain the original
 single-output NIfTI transport when a different manifest selects it.
 
-Every current image socket must contain exactly one
-`.nii.gz` file. A manifest input declares:
+Every current image socket contains exactly one manifest-accepted scalar 3D
+medical image. A manifest input declares:
 
 - `slug`: the opaque Grand Challenge socket identifier;
 - `dataset_key`: the repository adapter's canonical raw modality key;
-- `relative_path`, `file_type`, and single-value `cardinality`.
+- `relative_path`, `kind: image`, and single-value `cardinality`;
+- `accepted_formats`, selected by the competition interface;
+- `canonical_format: nii_gz`, required by registered preprocessing adapters.
+
+The official ISLES26 manifest accepts hosted MHA/TIFF plus local `.nii` and
+`.nii.gz` representations. The runtime discovers one accepted regular file
+without depending on or logging its platform-generated name. MHA/TIFF are read
+as scalar 3D SimpleITK images and written as invocation-local compressed NIfTI;
+uncompressed NIfTI is gzip-normalized byte-for-byte; `.nii.gz` passes through
+read-only. Source and canonical grid, dtype, voxel content, and asymmetric
+world-coordinate landmarks are checked before preprocessing. Canonical scratch
+is created only beneath `/tmp` and removed on success or failure. TIFF fidelity
+is measured from the TIFF actually received—the runtime does not invent header
+information that its serialization did not carry.
 
 Socket slugs never enter shared preprocessing or model inference. The runtime reads
 `/input/inputs.json`, selects the exact configured socket set, and passes only the
@@ -69,6 +82,19 @@ and a minimal inference dependency lock. It copies no checkpoint. Image build an
 save inspect the resulting filesystem and fail if `/opt/ml/model` is non-empty or
 a PyTorch checkpoint-like file exists beneath `/opt/app`. At runtime the platform
 mounts the separately extracted model directory read-only at `/opt/ml/model`.
+The builder also hashes every source/config/dependency file copied into the
+image. That SHA-256 is written to the build report, image label, and runtime
+environment, so an image built from an uncommitted review tree remains exactly
+identifiable.
+
+Runtime logs use bounded single-line `GC_EVENT` JSON records. Startup records
+dependency/GPU identity, artifact and policy hashes, adapter/interface bindings,
+model summary, named stage durations, and resource capacity. Invocation records
+safe input format/count/geometry contracts, canonicalization, required stage
+durations, output validation, peak CUDA allocation/reservation, host RSS/cgroup
+memory, and scratch usage. Failures carry a stable stage and error code with
+sanitized detail; platform filenames, metadata values, tensors, voxel data, and
+per-sliding-window events are never logged.
 
 The equivalent thin shell entrypoint is:
 
@@ -79,7 +105,7 @@ bash scripts/gc_submission_builder/container/build.sh
 ## Local lifecycle test
 
 The test command starts the image on an internal Docker network, a read-only root filesystem,
-read-only input and model mounts, writable `/output`, transient `/tmp`, 32 GB host
+read-only input and model mounts, writable `/output`, transient `/tmp`, 16 GB host
 memory, 8 CPUs, and one available GPU. A separate tester sidecar on that same
 offline network requires an exact HTTP 200 from `/health` and invokes `/invoke`
 with the organizer's 300-second local timeout. The test then reopens every declared
@@ -144,5 +170,6 @@ Desktop container smoke tests establish code, dependency, transport, and spatial
 behavior. They do not certify AWS T4 peak memory or the ten-minute case deadline;
 those measurements belong to the following resource-certification cut. The
 official manifest and two-output lifecycle satisfy Cut 10B's interface boundary;
-upload readiness still depends on Cut 11 resource certification and the final
-platform dry run in Cut 12.
+hosted image-input normalization and observability are completed by Cut 10B-2;
+upload readiness still depends on its rebuilt-image lifecycle evidence, Cut 11
+resource certification, and the final platform dry run in Cut 12.

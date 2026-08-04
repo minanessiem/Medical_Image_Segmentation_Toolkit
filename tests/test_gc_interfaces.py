@@ -39,7 +39,9 @@ class TestGcInterfaces(unittest.TestCase):
                                     "slug": slug,
                                     "dataset_key": dataset_key,
                                     "relative_path": "images/fixture-input",
-                                    "file_type": "nifti",
+                                    "kind": "image",
+                                    "accepted_formats": ["nii_gz"],
+                                    "canonical_format": "nii_gz",
                                     "cardinality": "one",
                                 }
                             ],
@@ -110,11 +112,36 @@ class TestGcInterfaces(unittest.TestCase):
                 self._write_invocation(root / "second", slug="second-unrelated-slug"),
             )
 
-        self.assertEqual(tuple(first.raw_modalities), ("T1",))
-        self.assertEqual(tuple(second.raw_modalities), ("T1",))
-        self.assertNotIn("first-unrelated-slug", first.raw_modalities)
-        self.assertNotIn("second-unrelated-slug", second.raw_modalities)
+        self.assertEqual(tuple(first.image_inputs), ("T1",))
+        self.assertEqual(tuple(second.image_inputs), ("T1",))
+        self.assertNotIn("first-unrelated-slug", first.image_inputs)
+        self.assertNotIn("second-unrelated-slug", second.image_inputs)
+        self.assertEqual(first.image_inputs["T1"].source_format, "nii_gz")
         self.assertEqual(first.interface.name, "fixture-nifti-interface")
+
+    def test_resolution_timings_use_the_injected_monotonic_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = load_interface_manifest(self._write_manifest(root))
+            input_root = self._write_invocation(
+                root,
+                slug="opaque-fixture-image",
+            )
+            clock_values = iter((0.0, 2.0, 2.0, 5.0, 5.0, 7.0))
+
+            invocation = resolve_invocation(
+                manifest,
+                input_root,
+                clock=lambda: next(clock_values),
+            )
+
+        self.assertEqual(
+            invocation.resolution_timings_seconds,
+            {
+                "interface_resolution_seconds": 4.0,
+                "input_discovery_seconds": 3.0,
+            },
+        )
 
     def test_interface_key_is_exact_and_rejects_missing_or_extra_sockets(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -184,7 +211,9 @@ class TestGcInterfaces(unittest.TestCase):
                     "slug": "duplicate-key-socket",
                     "dataset_key": "T1",
                     "relative_path": "images/other",
-                    "file_type": "nifti",
+                    "kind": "image",
+                    "accepted_formats": ["nii_gz"],
+                    "canonical_format": "nii_gz",
                     "cardinality": "one",
                 }
             )
@@ -207,6 +236,36 @@ class TestGcInterfaces(unittest.TestCase):
             payload["interfaces"][0]["inputs"][0]["relative_path"] = "../secret"
             path.write_text(yaml.safe_dump(payload), encoding="utf-8")
             with self.assertRaisesRegex(InterfaceManifestError, "relative path"):
+                load_interface_manifest(path)
+
+    def test_image_binding_requires_explicit_supported_formats_and_canonical_nii_gz(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._write_manifest(root)
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+            binding = payload["interfaces"][0]["inputs"][0]
+
+            binding["accepted_formats"] = ["dicom"]
+            path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+            with self.assertRaisesRegex(InterfaceManifestError, "unsupported.*dicom"):
+                load_interface_manifest(path)
+
+            binding["accepted_formats"] = ["mha", "mha"]
+            path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+            with self.assertRaisesRegex(InterfaceManifestError, "must be unique"):
+                load_interface_manifest(path)
+
+            binding["accepted_formats"] = ["mha"]
+            binding["canonical_format"] = "mha"
+            path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+            with self.assertRaisesRegex(InterfaceManifestError, "canonical_format.*nii_gz"):
+                load_interface_manifest(path)
+
+            binding.pop("kind")
+            binding["canonical_format"] = "nii_gz"
+            binding["file_type"] = "nifti"
+            path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+            with self.assertRaisesRegex(InterfaceManifestError, "unknown keys.*file_type"):
                 load_interface_manifest(path)
 
     def test_required_technical_json_is_transport_metadata_not_a_modality(self):
@@ -244,12 +303,12 @@ class TestGcInterfaces(unittest.TestCase):
 
             invocation = resolve_invocation(manifest, input_root)
 
-        self.assertEqual(tuple(invocation.raw_modalities), ("T1",))
+        self.assertEqual(tuple(invocation.image_inputs), ("T1",))
         self.assertEqual(
             invocation.technical_inputs["opaque-technical-parameters"],
             {"field_strength_t": 3.0},
         )
-        self.assertNotIn("opaque-technical-parameters", invocation.raw_modalities)
+        self.assertNotIn("opaque-technical-parameters", invocation.image_inputs)
 
     def test_official_manifest_declares_exact_result_bindings_and_nullable_schema(self):
         manifest = load_interface_manifest(
@@ -265,6 +324,12 @@ class TestGcInterfaces(unittest.TestCase):
             [(binding.slug, binding.dataset_key) for binding in interface.inputs],
             [("t1-brain-mri", "T1")],
         )
+        self.assertEqual(interface.inputs[0].kind, "image")
+        self.assertEqual(
+            interface.inputs[0].accepted_formats,
+            ("mha", "tif", "tiff", "nii", "nii_gz"),
+        )
+        self.assertEqual(interface.inputs[0].canonical_format, "nii_gz")
         self.assertEqual(
             [
                 (binding.slug, binding.result_key, binding.file_type)
@@ -278,6 +343,55 @@ class TestGcInterfaces(unittest.TestCase):
         schema = interface.technical_inputs[0].schema
         self.assertEqual(set(schema), {"CENTER", "CHRONICITY", "DAYS_POST_STROKE"})
         self.assertTrue(all(field.nullable for field in schema.values()))
+
+    def test_official_image_binding_resolves_mha_without_exposing_platform_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = load_interface_manifest(
+                Path("scripts/gc_submission_builder/configs/interfaces/isles26.yaml")
+            )
+            input_root = root / "input"
+            image_dir = input_root / "images" / "t1-brain-mri"
+            image_dir.mkdir(parents=True)
+            source = image_dir / "patient-looking-platform-name.mha"
+            source.write_bytes(b"fixture-mha-content")
+            (input_root / "stroke-metadata.json").write_text(
+                '{"CENTER": null, "CHRONICITY": null, "DAYS_POST_STROKE": null}',
+                encoding="utf-8",
+            )
+            (input_root / "inputs.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "socket": {
+                                "slug": "t1-brain-mri",
+                                "relative_path": "images/t1-brain-mri",
+                            }
+                        },
+                        {
+                            "socket": {
+                                "slug": "stroke-metadata",
+                                "relative_path": "stroke-metadata.json",
+                            }
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            invocation = resolve_invocation(manifest, input_root)
+            selected = invocation.image_inputs["T1"]
+            self.assertEqual(selected.source_format, "mha")
+            self.assertEqual(selected.source_path, source.resolve())
+            self.assertEqual(selected.observed_format_counts["mha"], 1)
+
+            (image_dir / "second.mha").write_bytes(b"ambiguous")
+            with self.assertRaises(InterfaceManifestError) as raised:
+                resolve_invocation(manifest, input_root)
+
+        message = str(raised.exception)
+        self.assertIn("observed_format_counts", message)
+        self.assertNotIn("patient-looking-platform-name", message)
 
     def test_output_bindings_are_explicit_unique_and_do_not_accept_legacy_singular_output(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -370,7 +484,7 @@ class TestGcInterfaces(unittest.TestCase):
 
             invocation = resolve_invocation(manifest, input_root)
 
-        self.assertEqual(tuple(invocation.raw_modalities), ("T1",))
+        self.assertEqual(tuple(invocation.image_inputs), ("T1",))
         self.assertIsNone(invocation.technical_inputs["stroke-metadata"]["CENTER"])
 
     def test_official_metadata_schema_rejects_missing_wrong_and_nonfinite_values(self):

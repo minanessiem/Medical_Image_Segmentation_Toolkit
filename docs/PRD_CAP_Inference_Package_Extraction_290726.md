@@ -675,7 +675,9 @@ case_producer = build_case_producer(
     dataset_cfg=saved_cfg.dataset,
     load_labels=False,
 )
-preprocessed = case_producer.preprocess(raw_modalities=canonical_raw_inputs)
+preprocessed = case_producer.preprocess(
+    {"caseID": case_id, **canonical_raw_inputs}
+)
 
 result = predict_case(
     predictor=predictor,

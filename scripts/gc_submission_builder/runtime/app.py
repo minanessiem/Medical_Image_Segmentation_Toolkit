@@ -15,9 +15,15 @@ from scripts.gc_submission_builder.runtime.inference import (
     GcInferenceRuntime,
     initialize_runtime,
 )
+from scripts.gc_submission_builder.runtime.observability import (
+    emit_gc_event,
+    failure_event_fields,
+    resource_summary,
+    runtime_identity,
+)
 
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("scripts.gc_submission_builder.runtime.app")
 RUNTIME_LOGGER = logging.getLogger("scripts.gc_submission_builder.runtime")
 RUNTIME_LOGGER.setLevel(logging.INFO)
 if not RUNTIME_LOGGER.handlers:
@@ -83,9 +89,12 @@ def create_app(
             )
         except Exception as exc:
             state.initialization_error_type = type(exc).__name__
-            LOGGER.error(
-                "Grand Challenge runtime initialization failed error_type=%s",
-                state.initialization_error_type,
+            emit_gc_event(
+                LOGGER,
+                "startup_failed",
+                **dict(failure_event_fields(exc)),
+                identity=dict(runtime_identity()),
+                resources=dict(resource_summary()),
             )
         yield
         state.runtime = None
@@ -105,9 +114,16 @@ def create_app(
         try:
             state.runtime.invoke(input_root="/input", output_root="/output")
         except Exception as exc:
-            LOGGER.error(
-                "Grand Challenge invocation failed error_type=%s",
-                type(exc).__name__,
+            emit_gc_event(
+                LOGGER,
+                "invocation_failed",
+                **dict(failure_event_fields(exc)),
+                resources=dict(
+                    resource_summary(
+                        device=getattr(state.runtime, "device", None),
+                        scratch_root="/tmp",
+                    )
+                ),
             )
             return Response(content="INFERENCE_FAILED", status_code=500)
         return Response(status_code=201)

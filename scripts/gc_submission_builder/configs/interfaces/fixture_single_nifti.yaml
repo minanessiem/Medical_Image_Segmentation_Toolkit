@@ -4,7 +4,9 @@ interfaces:
       - slug: opaque-fixture-image
         dataset_key: T1
         relative_path: images/fixture-input
-        file_type: nifti
+        kind: image
+        accepted_formats: [nii_gz]
+        canonical_format: nii_gz
         cardinality: one
     technical_inputs: []
     outputs:

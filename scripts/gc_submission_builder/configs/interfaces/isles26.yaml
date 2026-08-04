@@ -4,7 +4,9 @@ interfaces:
       - slug: t1-brain-mri
         dataset_key: T1
         relative_path: images/t1-brain-mri
-        file_type: nifti
+        kind: image
+        accepted_formats: [mha, tif, tiff, nii, nii_gz]
+        canonical_format: nii_gz
         cardinality: one
     technical_inputs:
       - slug: stroke-metadata

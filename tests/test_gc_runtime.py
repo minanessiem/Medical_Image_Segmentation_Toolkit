@@ -41,7 +41,9 @@ def _write_manifest(root: Path, *, dataset_key: str = "T1") -> Path:
       - slug: arbitrary-image-socket
         dataset_key: %s
         relative_path: images/input
-        file_type: nifti
+        kind: image
+        accepted_formats: [nii_gz]
+        canonical_format: nii_gz
         cardinality: one
     technical_inputs: []
     outputs:
@@ -403,6 +405,7 @@ class TestGcRuntime(unittest.TestCase):
             producer = Mock()
             producer.preprocess.return_value = case
             producer.adapter.dataset_id = "isles26"
+            producer.reference_key = None
             policy = parse_inference_policy(
                 {"output_space": "native_input"},
                 model_roi=(3, 4, 5),
@@ -433,6 +436,7 @@ class TestGcRuntime(unittest.TestCase):
                 report = runtime.invoke(
                     input_root=input_root,
                     output_root=root / "output",
+                    scratch_root=root,
                 )
 
         record = producer.preprocess.call_args.args[0]
@@ -446,6 +450,23 @@ class TestGcRuntime(unittest.TestCase):
         self.assertNotIn(
             "path", report.output_validations["arbitrary-output-socket"]
         )
+        self.assertEqual(
+            set(report.timings_seconds),
+            {
+                "interface_resolution_seconds",
+                "input_discovery_seconds",
+                "input_canonicalization_seconds",
+                "preprocessing_seconds",
+                "device_transfer_seconds",
+                "prediction_pipeline_seconds",
+                "output_materialization_validation_seconds",
+                "invoke_total_seconds",
+            },
+        )
+        self.assertTrue(
+            all(value >= 0 for value in report.timings_seconds.values())
+        )
+        self.assertIn("host_peak_rss_bytes", report.resources)
         predict.assert_called_once()
 
 

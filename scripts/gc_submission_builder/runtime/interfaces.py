@@ -6,8 +6,9 @@ from dataclasses import dataclass
 import json
 import math
 from pathlib import Path, PurePosixPath
+from time import perf_counter
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
@@ -18,6 +19,16 @@ class InterfaceManifestError(ValueError):
 
 RESULT_KEYS = frozenset({"mask", "probability"})
 TECHNICAL_FIELD_TYPES = frozenset({"string", "integer", "number"})
+IMAGE_SOURCE_FORMATS = frozenset({"mha", "tif", "tiff", "nii", "nii_gz"})
+IMAGE_SOURCE_SUFFIXES = MappingProxyType(
+    {
+        "mha": ".mha",
+        "tif": ".tif",
+        "tiff": ".tiff",
+        "nii": ".nii",
+        "nii_gz": ".nii.gz",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -25,8 +36,23 @@ class InputBinding:
     slug: str
     dataset_key: str
     relative_path: str
-    file_type: str
+    kind: str
+    accepted_formats: tuple[str, ...]
+    canonical_format: str
     cardinality: str
+
+
+@dataclass(frozen=True)
+class ResolvedImageInput:
+    """One platform image selected without exposing its generated filename."""
+
+    slug: str
+    dataset_key: str
+    source_path: Path
+    source_format: str
+    source_size_bytes: int
+    observed_format_counts: Mapping[str, int]
+    other_regular_file_count: int
 
 
 @dataclass(frozen=True)
@@ -77,8 +103,9 @@ class InterfaceManifest:
 @dataclass(frozen=True)
 class ResolvedInvocation:
     interface: InterfaceDefinition
-    raw_modalities: Mapping[str, Path]
+    image_inputs: Mapping[str, ResolvedImageInput]
     technical_inputs: Mapping[str, Any]
+    resolution_timings_seconds: Mapping[str, float]
 
 
 def load_interface_manifest(path: str | Path) -> InterfaceManifest:
@@ -138,9 +165,12 @@ def validate_dataset_bindings(
 def resolve_invocation(
     manifest: InterfaceManifest,
     input_root: str | Path,
+    *,
+    clock: Callable[[], float] = perf_counter,
 ) -> ResolvedInvocation:
     """Dispatch `/input/inputs.json` and return canonical raw-key paths."""
 
+    started = clock()
     if not isinstance(manifest, InterfaceManifest):
         raise InterfaceManifestError("manifest must be an InterfaceManifest.")
     root = Path(input_root).expanduser().resolve()
@@ -174,16 +204,21 @@ def resolve_invocation(
             f"observed={interface_key}, configured={configured}."
         )
     interface = matches[0]
+    interface_resolution_seconds = max(0.0, clock() - started)
 
-    raw_modalities: dict[str, Path] = {}
+    discovery_started = clock()
+    image_inputs: dict[str, ResolvedImageInput] = {}
     for binding in interface.inputs:
         _validate_platform_relative_path(socket_entries[binding.slug], binding)
         directory = _resolve_under_root(root, binding.relative_path)
-        raw_modalities[binding.dataset_key] = _resolve_single_nifti(
+        image_inputs[binding.dataset_key] = _resolve_single_image(
             directory,
+            binding=binding,
             input_root=root,
         )
+    input_discovery_seconds = max(0.0, clock() - discovery_started)
 
+    technical_started = clock()
     technical_values: dict[str, Any] = {}
     for binding in interface.technical_inputs:
         _validate_platform_relative_path(socket_entries[binding.slug], binding)
@@ -198,11 +233,18 @@ def resolve_invocation(
             ) from exc
         _validate_technical_value(value, binding=binding)
         technical_values[binding.slug] = value
+    interface_resolution_seconds += max(0.0, clock() - technical_started)
 
     return ResolvedInvocation(
         interface=interface,
-        raw_modalities=MappingProxyType(raw_modalities),
+        image_inputs=MappingProxyType(image_inputs),
         technical_inputs=MappingProxyType(technical_values),
+        resolution_timings_seconds=MappingProxyType(
+            {
+                "interface_resolution_seconds": float(interface_resolution_seconds),
+                "input_discovery_seconds": float(input_discovery_seconds),
+            }
+        ),
     )
 
 
@@ -266,22 +308,52 @@ def _parse_input(value: Any, *, path: str) -> InputBinding:
     raw = _mapping(value, path)
     _unknown(
         raw,
-        {"slug", "dataset_key", "relative_path", "file_type", "cardinality"},
+        {
+            "slug",
+            "dataset_key",
+            "relative_path",
+            "kind",
+            "accepted_formats",
+            "canonical_format",
+            "cardinality",
+        },
         path,
     )
-    file_type = _string(raw.get("file_type"), f"{path}.file_type").lower()
-    cardinality = _string(raw.get("cardinality"), f"{path}.cardinality").lower()
-    if file_type != "nifti":
+    kind = _string(raw.get("kind"), f"{path}.kind").lower()
+    if kind != "image":
+        raise InterfaceManifestError(f"{path}.kind must be 'image'.")
+    raw_formats = _sequence(raw.get("accepted_formats"), f"{path}.accepted_formats")
+    accepted_formats = tuple(
+        _string(value, f"{path}.accepted_formats[{index}]").lower()
+        for index, value in enumerate(raw_formats)
+    )
+    if not accepted_formats:
+        raise InterfaceManifestError(f"{path}.accepted_formats must not be empty.")
+    if len(accepted_formats) != len(set(accepted_formats)):
+        raise InterfaceManifestError(f"{path}.accepted_formats must be unique.")
+    unsupported = sorted(set(accepted_formats) - IMAGE_SOURCE_FORMATS)
+    if unsupported:
         raise InterfaceManifestError(
-            f"{path}.file_type must be 'nifti' for the current certified transport."
+            f"{path}.accepted_formats contains unsupported values: {unsupported}."
         )
+    canonical_format = _string(
+        raw.get("canonical_format"),
+        f"{path}.canonical_format",
+    ).lower()
+    if canonical_format != "nii_gz":
+        raise InterfaceManifestError(
+            f"{path}.canonical_format must be 'nii_gz' for registered preprocessing."
+        )
+    cardinality = _string(raw.get("cardinality"), f"{path}.cardinality").lower()
     if cardinality != "one":
         raise InterfaceManifestError(f"{path}.cardinality must be 'one'.")
     return InputBinding(
         slug=_string(raw.get("slug"), f"{path}.slug"),
         dataset_key=_string(raw.get("dataset_key"), f"{path}.dataset_key"),
         relative_path=_relative_path(raw.get("relative_path"), f"{path}.relative_path"),
-        file_type=file_type,
+        kind=kind,
+        accepted_formats=accepted_formats,
+        canonical_format=canonical_format,
         cardinality=cardinality,
     )
 
@@ -426,28 +498,69 @@ def _resolve_under_root(root: Path, relative_path: str) -> Path:
     return candidate
 
 
-def _resolve_single_nifti(directory: Path, *, input_root: Path) -> Path:
+def _resolve_single_image(
+    directory: Path,
+    *,
+    binding: InputBinding,
+    input_root: Path,
+) -> ResolvedImageInput:
     if not directory.is_dir():
-        raise InterfaceManifestError("Required NIfTI socket directory does not exist.")
-    matches: list[Path] = []
+        raise InterfaceManifestError("Required image socket directory does not exist.")
+    matches: list[tuple[str, Path]] = []
+    counts = {source_format: 0 for source_format in binding.accepted_formats}
+    other_regular_file_count = 0
     for path in directory.iterdir():
-        if not path.is_file() or not path.name.lower().endswith(".nii.gz"):
+        if path.is_symlink():
+            source_format = _image_source_format(path.name)
+            if source_format in counts:
+                raise InterfaceManifestError(
+                    "Image socket contains a symbolic link for an accepted format."
+                )
+            continue
+        if not path.is_file():
+            continue
+        source_format = _image_source_format(path.name)
+        if source_format not in counts:
+            other_regular_file_count += 1
             continue
         resolved = path.resolve()
         try:
             resolved.relative_to(input_root)
         except ValueError as exc:
             raise InterfaceManifestError(
-                "Resolved NIfTI input file escapes /input."
+                "Resolved image input file escapes /input."
             ) from exc
-        matches.append(resolved)
-    matches.sort()
+        counts[source_format] += 1
+        matches.append((source_format, resolved))
+    matches.sort(key=lambda item: (item[0], str(item[1])))
     if len(matches) != 1:
         raise InterfaceManifestError(
-            "A single-value NIfTI socket must contain exactly one .nii.gz file; "
-            f"observed_count={len(matches)}."
+            "A single-value image socket must contain exactly one accepted medical "
+            f"image; observed_format_counts={counts}, "
+            f"other_regular_file_count={other_regular_file_count}."
         )
-    return matches[0]
+    source_format, source_path = matches[0]
+    try:
+        source_size_bytes = source_path.stat().st_size
+    except OSError as exc:
+        raise InterfaceManifestError("Could not stat the selected image input.") from exc
+    return ResolvedImageInput(
+        slug=binding.slug,
+        dataset_key=binding.dataset_key,
+        source_path=source_path,
+        source_format=source_format,
+        source_size_bytes=int(source_size_bytes),
+        observed_format_counts=MappingProxyType(dict(counts)),
+        other_regular_file_count=other_regular_file_count,
+    )
+
+
+def _image_source_format(filename: str) -> str | None:
+    lowered = filename.lower()
+    for source_format in ("nii_gz", "tiff", "mha", "tif", "nii"):
+        if lowered.endswith(IMAGE_SOURCE_SUFFIXES[source_format]):
+            return source_format
+    return None
 
 
 def _relative_path(value: Any, path: str) -> str:
@@ -487,11 +600,14 @@ def _unknown(raw: Mapping[str, Any], allowed: set[str], path: str) -> None:
 
 
 __all__ = [
+    "IMAGE_SOURCE_FORMATS",
+    "IMAGE_SOURCE_SUFFIXES",
     "InputBinding",
     "InterfaceDefinition",
     "InterfaceManifest",
     "InterfaceManifestError",
     "OutputBinding",
+    "ResolvedImageInput",
     "ResolvedInvocation",
     "TechnicalInputBinding",
     "TechnicalFieldSchema",
