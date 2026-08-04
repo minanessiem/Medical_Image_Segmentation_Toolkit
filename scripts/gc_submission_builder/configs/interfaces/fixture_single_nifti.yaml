@@ -1,0 +1,14 @@
+interfaces:
+  - name: fixture-single-nifti
+    inputs:
+      - slug: opaque-fixture-image
+        dataset_key: T1
+        relative_path: images/fixture-input
+        file_type: nifti
+        cardinality: one
+    technical_inputs: []
+    outputs:
+      - slug: opaque-fixture-segmentation
+        result_key: mask
+        relative_path: images/fixture-output
+        file_type: nifti

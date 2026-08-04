@@ -1,8 +1,8 @@
 # PRD and CAP: Shared Inference Package Extraction and ISLES26 Grand Challenge Submission Builder
 
-**Document version:** 1.5
+**Document version:** 1.6
 **Original date:** 2026-07-29
-**Last revised:** 2026-08-03
+**Last revised:** 2026-08-04
 **Status:** Draft for implementation
 **Primary competition:** ISLES26 3D lesion segmentation
 **Primary model scope:** Existing 3D discriminative MONAI DynUNet checkpoints
@@ -46,7 +46,10 @@ The repository has become a configurable training and evaluation platform for 2D
 The ISLES26 submission introduces a different execution environment from research training:
 
 - one unseen 3D case is processed per container job;
-- the model runs on an AWS `g4dn.2xlarge`-class instance with one NVIDIA T4 GPU and 16 GB VRAM, 32 GB host RAM, and 8 vCPUs;
+- the hosted algorithm job exposes one NVIDIA T4 GPU with 16 GB VRAM, 16 GB
+  requested host memory, and 8 vCPUs; the earlier `g4dn.2xlarge` description
+  remains infrastructure context, but release qualification uses the lower
+  16 GB limit reported by the actual Grand Challenge job;
 - each case must finish within ten minutes;
 - the runtime has no network access;
 - model weights are mounted or expanded separately under `/opt/ml/model/`;
@@ -188,9 +191,13 @@ nnU-Net volume evaluator consumes it from the composed conversion config.
 
 - The submitted model is an existing 3D discriminative segmentation model, initially the DynUNet represented by `configs/cluster_isles26_atlas30_3d_randompatch_dynunet.yaml`.
 - The clinical image modality is one 3D T1-weighted MRI volume.
-- The project-standard input and mask format is `.nii.gz`.
+- The project-standard dataset/training input and mask format is `.nii.gz`.
+  Grand Challenge image-kind sockets are a separate transport boundary and may
+  materialize that source image as MHA or TIFF before container invocation.
 - Case batch size is exactly one.
-- The target hardware is one T4 with 16 GB VRAM, 32 GB RAM, and 8 vCPUs.
+- The target hardware is one T4 with 16 GB VRAM, 16 GB requested host memory,
+  and 8 vCPUs, matching the first hosted algorithm-result allocation rather
+  than the larger nominal memory of the underlying instance family.
 - The maximum execution time is ten minutes per case.
 - The model is loaded before per-case invocation whenever the platform lifecycle allows it.
 - Model artifacts are separate from the image and reside at `/opt/ml/model/`.
@@ -289,12 +296,21 @@ or pass them to preprocessing/model inference in the current unconditioned
 model scope.
 
 The organizer README instructs local tests to place a `.nii.gz` T1 beneath the
-published image path. NIfTI remains the internal input and the existing native
-output transport for compatible consumers. The organizer's ISLES26 example
-writes both official outputs as compressed MHA, so Cut 10B adds an MHA boundary
-adapter alongside, not in place of, NIfTI. MHA conversion must preserve voxel
-values and physical geometry and must not change trained preprocessing,
-spatial restoration, thresholding order, or `PredictionResult` semantics.
+published image path, but the hosted challenge interface declares an image-kind
+socket read from `/input/images/t1-brain-mri/<uuid>.mha` or
+`/input/images/t1-brain-mri/<uuid>.tif`. Dataset format and platform transport
+format are therefore separate contracts. NIfTI remains the canonical internal
+input and the existing native output transport for compatible consumers; the GC
+adapter must discover the platform image, validate it, and losslessly
+canonicalize MHA/TIFF to invocation-local `.nii.gz` scratch before calling the
+registered preprocessing adapter. This conversion must preserve voxel values
+and physical geometry and must not change trained preprocessing, spatial
+restoration, thresholding order, or `PredictionResult` semantics.
+
+The organizer's ISLES26 example writes both official outputs as compressed MHA,
+so Cut 10B adds an MHA output adapter alongside, not in place of, NIfTI. MHA is
+the selected ISLES26 output even though the platform also permits TIFF; no TIFF
+output writer is required for this release.
 
 The official local lifecycle calls the HTTP service from outside the algorithm
 container and applies a 300-second `/invoke` timeout. This is a local interface
@@ -313,11 +329,20 @@ implemented transport and may declare different output sets while reusing the
 same model/result pipeline. Fixture manifests retain deliberately opaque slugs
 to prove that no official slug is hardcoded in Python.
 
-The remaining external release gate is a Grand Challenge-hosted try-out that
-confirms the actual platform-materialized T1 format and accepts both official
-MHA outputs. If hosted provisioning differs from the pinned starter template,
-the interface manifest and boundary adapter are revised without altering core
-preprocessing or inference.
+An early Grand Challenge-hosted try-out was executed on 2026-08-04 as algorithm
+result `148ccec2-c194-49fb-a5ce-4fecb46b67c7`. The container initialized CUDA,
+the DynUNet model, checkpoint, dataset adapter, and inference policy, then failed
+before preprocessing with `InterfaceManifestError`. The submitted Cut 10B image
+searched the image-kind directory exclusively for `.nii.gz`; the hosted
+interface instead materializes MHA or TIFF. The original log suppressed the
+exception detail, so it did not retain whether that case used `.mha` or `.tif`,
+but it conclusively exposed the invalid NIfTI-only platform-input assumption.
+
+Cut 10B-2 corrects this hosted transport contract and adds stage-aware,
+privacy-safe observability. A later hosted try-out remains required to confirm
+successful input canonicalization and acceptance of both official MHA outputs.
+Hosted differences are resolved in the GC boundary adapter without altering
+core preprocessing or inference semantics.
 
 ---
 
@@ -590,7 +615,8 @@ scripts/gc_submission_builder/
     app.py                  # /health and /invoke server integration
     inference.py            # init_model() and per-case run()
     interfaces.py           # inputs.json/socket/path dispatch
-    image_io.py             # transport format read/write and validation
+    image_io.py             # input canonicalization plus output transport validation
+    observability.py        # privacy-safe structured events, stage timing, and resources
   container/
     Dockerfile
     requirements.lock
@@ -830,7 +856,9 @@ interfaces:
       - slug: fixture-image-socket
         dataset_key: T1
         relative_path: images/fixture-input
-        file_type: nifti
+        kind: image
+        accepted_formats: [nii_gz]
+        canonical_format: nii_gz
         cardinality: one
 
     technical_inputs: []
@@ -851,7 +879,9 @@ interfaces:
       - slug: t1-brain-mri
         dataset_key: T1
         relative_path: images/t1-brain-mri
-        file_type: nifti
+        kind: image
+        accepted_formats: [mha, tif, tiff, nii, nii_gz]
+        canonical_format: nii_gz
         cardinality: one
 
     technical_inputs:
@@ -880,6 +910,14 @@ is not derived from `slug`. `result_key` is selected from the shared prediction
 result contract; it is not derived from slug text or output position. The list
 order is deterministic but never semantic. Duplicate slugs, dataset keys,
 result keys, or relative paths are invalid within an interface.
+
+Input `kind: image` describes the platform socket rather than the dataset's
+original storage format. `accepted_formats` is an explicit transport allowlist;
+`canonical_format` declares what the registered preprocessing adapter receives.
+The ISLES26 adapter accepts the hosted MHA/TIFF forms plus NIfTI forms used by
+the organizer's local harness and reusable fixtures, then exposes only canonical
+`.nii.gz` paths downstream. Output `file_type` continues to select a concrete
+materializer.
 
 Technical schemas are transport validation, not model conditioning. Model
 architecture, processed channel names, preprocessing parameters, ROI,
@@ -1135,9 +1173,10 @@ second nnU-Net provenance subsystem.
 | `scripts/nnunet/core/io_adapters.py` and evaluation orchestration | Compliant external-model 3D producer | Consume conversion-owned space, validate prediction/reference NIfTI geometry, and emit the finalized volume-space contract before Cut 5 |
 | `scripts/analysis/threshold_analysis.py` | Legacy migration/deprecation | Do not extend independently; later delegate or retire after parity |
 | `scripts/test_validation_memory.py` | Replace or delegate | Convert to shared predictor resource smoke test or supersede with GC benchmark |
-| `scripts/gc_submission_builder/runtime/interfaces.py` | Generic interface and complete-output-set contract | Bind input slugs to canonical dataset keys, output slugs to explicit result keys, and validate required technical JSON without model conditioning |
-| `scripts/gc_submission_builder/runtime/image_io.py` | Parallel NIfTI and MHA boundary adapters | Preserve the existing NIfTI writer and add lossless MHA mask/probability materialization with reopened physical-geometry validation |
-| `scripts/gc_submission_builder/container_builder.py` | Organizer-style external lifecycle test | Call health/invoke from an external tester sidecar, enforce the local 300-second invoke bound, and require the complete declared output set |
+| `scripts/gc_submission_builder/runtime/interfaces.py` | Generic interface and complete-output-set contract | Bind image-kind input slugs to canonical dataset keys, discover one allowed platform representation, bind output slugs to explicit result keys, and validate required technical JSON without model conditioning |
+| `scripts/gc_submission_builder/runtime/image_io.py` | Input canonicalization and parallel output boundary adapters | Losslessly normalize allowed MHA/TIFF/NIfTI inputs to downstream `.nii.gz`, preserve the existing NIfTI writer, and materialize/validate MHA mask and probability outputs |
+| `scripts/gc_submission_builder/runtime/observability.py` | Structured production telemetry | Emit privacy-safe build/runtime identity, stage durations, resource summaries, geometry contracts, and actionable failure codes without logging patient filenames, metadata values, tensors, or image contents |
+| `scripts/gc_submission_builder/container_builder.py` | Organizer-style external lifecycle test | Call health/invoke from an external tester sidecar, enforce the local 300-second invoke bound and hosted 16 GB memory limit, require the complete declared output set, and assert required telemetry milestones |
 | `tests/test_evaluation_*` and loader/validation tests | Regression safety | Update mocks/import paths only where needed; preserve behavior assertions |
 | `scripts/nnunet/` | Intentionally separate | Reuse only generic contracts/tests when safe; no forced predictor integration |
 | `scripts/reporting/` | Artifact consumer only | No direct dependency required |
@@ -1211,6 +1250,23 @@ Every implementation cut must preserve these invariants where applicable:
 39. **External HTTP reachability:** the release lifecycle calls `/health` and
     `/invoke` from outside the algorithm container; a localhost self-probe is
     insufficient certification.
+40. **Platform-input canonicalization:** image-kind transport is resolved and
+    validated entirely within the GC adapter. Registered preprocessing receives
+    canonical `.nii.gz` paths and never branches on MHA, TIFF, socket slugs, or
+    platform-generated filenames.
+41. **Source-grid preservation:** input representation conversion does not
+    reorient, resample, crop, or normalize. Source and canonical shapes, scalar
+    voxel meaning, physical geometry, and asymmetric world-coordinate landmarks
+    must agree before preprocessing begins.
+42. **Actionable production observability:** every startup and invocation emits
+    a stable build/runtime identity, stage outcomes, finite nonnegative elapsed
+    times, and bounded resource summaries. Failures name the last active stage,
+    stable error code, error type, and sanitized detail rather than only an
+    exception class.
+43. **Telemetry isolation:** logging and timing must not expose patient
+    filenames, metadata values, tensors, or image contents; must not emit one
+    record per sliding window; and must not change inference behavior or become
+    a second orchestration path.
 
 ---
 
@@ -2583,7 +2639,9 @@ Cuts 0-10A and official ISLES26 template commit:
 5e25bfc36b1dc6d9c04c8c364f53fb75c6afad32
 ```
 
-Cut 11 depends on completion of Cut 10B so resource qualification measures the
+Cut 10B-2 follows the original Cut 10B implementation after hosted validation
+exposed its NIfTI-only input assumption. Cut 11 depends on Cut 10B-2 so resource
+qualification measures input canonicalization, production telemetry, and the
 actual two-output transport workload.
 
 ### Affected files and components
@@ -2728,6 +2786,336 @@ lacks the complete official output set.
 
 ---
 
+## 22B. Cut 10B-2: Hosted image-input normalization and production observability
+
+### Context
+
+Cut 10B correctly reconciled the published ISLES26 socket slugs, technical JSON,
+ordered probability/segmentation output set, compressed-MHA writers, external
+HTTP sidecar lifecycle, and complete-output transaction. Its Desktop tests used
+the organizer README's local `.nii.gz` fixture convention and therefore retained
+the Cut 10A assumption that the platform image directory itself would contain a
+NIfTI.
+
+The current challenge interface distinguishes the uploaded dataset format from
+the algorithm transport format. `t1-brain-mri` is an image-kind socket read
+from:
+
+```text
+/input/images/t1-brain-mri/<uuid>.mha
+```
+
+or:
+
+```text
+/input/images/t1-brain-mri/<uuid>.tif
+```
+
+An early hosted try-out of the uncommitted Cut 10B release candidate produced
+Grand Challenge result:
+
+```text
+148ccec2-c194-49fb-a5ce-4fecb46b67c7
+```
+
+The T4 container initialized the CUDA runtime, reconstructed the DynUNet,
+strictly loaded the model artifact, selected the ISLES26 adapter, and validated
+the deployment policy. `/invoke` then failed with `InterfaceManifestError`
+before preprocessing because the resolver accepted only `.nii.gz`. The image
+logged only the exception type, so the exact hosted suffix and failed invariant
+were not retained. The platform page nevertheless establishes that the
+NIfTI-only input assumption is invalid.
+
+Cut 10B-2 closes that hosted contract without changing trained preprocessing or
+shared inference. The GC boundary discovers one allowed image representation,
+canonicalizes it losslessly to invocation-local `.nii.gz`, validates the source
+and canonical physical grids, and passes only canonical dataset-key paths into
+the existing `PreprocessedCaseProducer`. It also adds structured, privacy-safe
+startup/invocation telemetry so one expensive image upload yields actionable
+evidence about stage progress, elapsed time, resource use, and failure cause.
+
+The model archive from the failed try-out remains valid: startup proved that it
+verified and loaded successfully. This cut rebuilds the independently replaceable
+Docker image only.
+
+### Dependencies
+
+- Cuts 0-10A.
+- The complete Cut 10B implementation and Desktop evidence; its closure commit
+  is recorded in the evidence ledger during this cut.
+- Official ISLES26 template commit
+  `5e25bfc36b1dc6d9c04c8c364f53fb75c6afad32`.
+- Hosted challenge interface declarations for the four published sockets.
+- Hosted failure result `148ccec2-c194-49fb-a5ce-4fecb46b67c7`.
+
+Cut 11 depends on Cut 10B-2, not merely the pre-hosted Cut 10B state, so T4
+resource qualification measures input canonicalization, both MHA outputs, and
+the production telemetry overhead. Cut 12 repeats the hosted try-out with the
+corrected release candidate.
+
+### Affected files and components
+
+- `scripts/gc_submission_builder/runtime/interfaces.py`
+- `scripts/gc_submission_builder/runtime/image_io.py`
+- `scripts/gc_submission_builder/runtime/inference.py`
+- `scripts/gc_submission_builder/runtime/app.py`
+- new `scripts/gc_submission_builder/runtime/observability.py`, unless a smaller
+  cohesive name is selected during implementation
+- `scripts/gc_submission_builder/configs/interfaces/isles26.yaml`
+- `scripts/gc_submission_builder/configs/interfaces/fixture_single_nifti.yaml`
+- `scripts/gc_submission_builder/container/Dockerfile`
+- `scripts/gc_submission_builder/container_builder.py`
+- `scripts/gc_submission_builder/container_config.py` and container config only
+  where resource/test parameters or build identity require them
+- `scripts/gc_submission_builder/README.md`
+- `tests/test_gc_interfaces.py`
+- `tests/test_gc_image_io.py`
+- `tests/test_gc_runtime.py`
+- `tests/test_gc_container_builder.py`
+- synthetic scalar 3D MHA, TIFF, `.nii`, and `.nii.gz` fixtures with nontrivial
+  physical geometry
+- `docs/INFERENCE_EXTRACTION_EVIDENCE_LEDGER.md`
+
+No shared predictor, model adapter, trained transform, dataset modality mapping,
+spatial restoration algorithm, threshold policy, or model artifact content is
+changed by this cut. `src/inference/` remains transport-agnostic. If deeper
+prediction substage timing cannot be observed without duplicating or bypassing
+the shared pipeline, this cut records the shared prediction pipeline as one
+span rather than weakening that boundary.
+
+### Desired changes
+
+1. Replace the input-only `file_type: nifti` assumption with an explicit
+   image-kind manifest contract. Each image input declares its accepted source
+   formats, canonical downstream format, cardinality, socket slug, relative
+   path, and canonical dataset key.
+2. Configure the ISLES26 image binding to accept `mha`, `tif`, `tiff`, `nii`,
+   and `nii_gz`, with `nii_gz` as the canonical downstream format. MHA/TIFF are
+   hosted image-kind representations; NIfTI forms retain organizer-local,
+   fixture, and reusable competition support.
+3. Preserve the opaque fixture manifest as a NIfTI-only accepted-format case so
+   the generic parser proves that accepted source formats are manifest-owned and
+   not globally inferred from ISLES26.
+4. Discover regular files in the declared image directory without logging or
+   depending on platform-generated filenames. Count allowed formats, require
+   exactly one allowed image for `cardinality: one`, reject symlink/path escape,
+   and fail clearly for zero or ambiguous supported files.
+5. Ignore unrelated regular auxiliary files only when they cannot match an
+   allowed image format; include privacy-safe counts by extension category in
+   telemetry. Do not select the first match according to filesystem order.
+6. Represent the resolved platform image with a typed transport value containing
+   its slug, canonical dataset key, safe source-format identifier, byte count,
+   and internal path. Do not pass this transport object into `src/inference/`.
+7. Create one invocation-local scratch directory beneath writable `/tmp` and
+   remove it on success or failure. Never write to read-only `/input` or mix
+   canonical inputs with `/output` artifacts.
+8. For `.nii.gz`, validate and use the original read-only path directly; do not
+   rewrite a canonical file that already satisfies the downstream contract.
+9. For `.nii`, gzip the single-file NIfTI bytes losslessly into scratch
+   `.nii.gz`. A decompression test must reproduce the original `.nii` bytes.
+10. For MHA and TIFF, use SimpleITK to read the source as a scalar 3D spatial
+    image and write an invocation-local compressed `.nii.gz`. Do not manually
+    transpose, flip, reorient, resample, crop, normalize, or construct a new
+    model grid during transport canonicalization.
+11. Reject two-dimensional, four-dimensional, vector/multicomponent, corrupt,
+    nonfinite-geometry, or otherwise unsupported platform images before trained
+    preprocessing begins. TIFF is supported only when SimpleITK resolves one
+    scalar 3D image; a 2D image or unsupported series representation fails
+    explicitly.
+12. Inspect the source through its native reader and the canonical `.nii.gz`
+    through nibabel/SimpleITK. Verify shape/size, scalar dtype semantics, finite
+    positive spacing, finite origin/direction, equivalent RAS/LPS physical
+    geometry, and multiple asymmetric voxel-to-world landmarks.
+13. Treat this conversion as representation normalization only. It must not
+    change the source grid or replace the saved dataset preprocessing. The
+    registered adapter continues to own all trained orientation, spacing,
+    intensity, crop, padding, and channel transforms.
+14. Pass the canonical mapping `{dataset_key: canonical_nii_gz_path}` into the
+    existing label-free `PreprocessedCaseProducer`. No shared or dataset code
+    branches on MHA, TIFF, Grand Challenge slugs, or platform UUID filenames.
+15. Retain a source-geometry inspection alongside the in-memory invocation so
+    final output validation can compare both official MHA outputs with the
+    originally received platform grid, not only with the intermediate NIfTI.
+16. Preserve the existing compressed-MHA probability/mask transaction and its
+    numeric validations. MHA remains the selected ISLES26 output; this cut does
+    not add a TIFF output writer because the published interface accepts MHA.
+17. Introduce one structured logging helper that emits stable single-line JSON
+    payloads prefixed by a recognizable marker such as `GC_EVENT`. All fields
+    must be JSON-serializable, deterministically named, bounded in size, and
+    flushed to container stdout/stderr.
+18. Add an image build/source fingerprint to both the exported image report and
+    runtime startup log. It must identify the exact copied runtime/manifest/
+    dependency state even when the build uses an uncommitted working tree; a Git
+    commit alone is insufficient in that case.
+19. Emit startup events for build identity, dependency/runtime versions, Python,
+    PyTorch/CUDA/cuDNN/MONAI/SimpleITK/nibabel versions, GPU identity and total
+    VRAM, visible device count, CPU count, cgroup host-memory limit, writable
+    scratch capacity, model-artifact hashes, model parameter/dtype/device
+    summary, dataset adapter/raw keys, active inference/runtime policy, interface
+    bindings, initialization outcome, and initialization resource summary.
+20. Emit invocation events for socket/interface resolution, safe image inventory,
+    selected source format/size, metadata keys/types/nullness without values,
+    source/canonical geometry, conversion outcome, preprocessing shapes,
+    prediction tensor/device/policy summary, restoration/output space, probability
+    and mask domain summaries, output geometry/compression checks, and final
+    resource summary.
+21. Replace exception-type-only startup and invocation logs with stable stage and
+    error codes plus sanitized actionable detail. Known contract errors may log
+    their safe message. Unexpected errors report exception type and internal
+    module/function/line locations without dumping filenames, metadata values,
+    tensors, image contents, or uncontrolled third-party exception text.
+22. Keep logging bounded. Do not emit per-voxel, per-slice, or per-sliding-window
+    events. Logging must not synchronize CUDA more often than required for
+    accurate enclosing-stage timing and must not materially alter the ten-minute
+    workload.
+23. Update the organizer-style smoke runtime from 32 GB to the 16 GB host-memory
+    request shown by the hosted job. Preserve 8 CPUs, GPU access, read-only
+    input/model mounts, writable output, bounded writable `/tmp`, non-root user,
+    offline algorithm networking, and the 300-second local invoke bound.
+24. Record the hosted failure and corrected evidence without treating the failed
+    model archive as invalid. E020 remains evidence for the exact Desktop Cut 10B
+    state but no longer establishes upload readiness.
+
+### Timing and performance telemetry contract
+
+Timing uses a monotonic high-resolution clock such as `time.perf_counter()` and
+reports elapsed seconds as finite nonnegative numbers. Wall-clock log timestamps
+remain useful for sequence inspection but are not used to calculate durations.
+The minimum startup timing fields are:
+
+- `artifact_validation_seconds`;
+- `policy_runtime_resolution_seconds`;
+- `model_construction_checkpoint_load_seconds`;
+- `adapter_manifest_initialization_seconds`;
+- `startup_total_seconds`.
+
+The minimum per-case invocation timing fields are:
+
+- `interface_resolution_seconds`;
+- `input_discovery_seconds`;
+- `input_canonicalization_seconds` (zero or near-zero for validated
+  `.nii.gz` pass-through, but still explicitly reported);
+- `preprocessing_seconds`;
+- `device_transfer_seconds`;
+- `prediction_pipeline_seconds` (shared probability execution, sliding-window
+  orchestration, native restoration, fixed threshold, and enabled
+  postprocessing as one minimum span);
+- `output_materialization_validation_seconds`;
+- `invoke_total_seconds`.
+
+If the shared pipeline exposes a natural nonduplicative observation seam,
+`prediction_pipeline_seconds` may additionally report
+`model_probability_execution_seconds`, `spatial_restoration_seconds`, and
+`threshold_postprocessing_seconds`. These optional subdivisions must wrap the
+canonical shared operations; Cut 10B-2 must not reproduce inference or
+restoration logic merely to obtain more granular timing.
+
+Every successful invocation emits one final timing summary. Every failed
+startup/invocation emits all completed stage durations, the elapsed duration of
+the active failed stage when safely measurable, total elapsed time until failure,
+and the last active stage. Stage totals need not sum exactly to the enclosing
+total because validation, logging, scheduling, and framework overhead remain,
+but no child span may be negative or exceed its enclosing span beyond a declared
+clock tolerance.
+
+The same summary records peak CUDA allocated and reserved bytes, peak host RSS or
+the closest reliable Linux/cgroup equivalent, configured cgroup memory limit,
+and scratch free/used bytes around canonicalization. Resource values are
+telemetry, not a fallback mechanism: an OOM or timeout remains a failed
+invocation and is never silently retried on CPU.
+
+These measurements cover code executing inside the algorithm container. They do
+not claim to measure Grand Challenge instance preparation, image download,
+container-image download, model expansion, or result upload outside the process.
+Hosted execution-history timestamps remain the authority for those external
+phases.
+
+### Expected tests and testing components
+
+- Manifest parsing accepts the explicit image-kind schema and rejects unknown
+  kinds, formats, canonical formats, unsafe paths, or unsupported cardinality.
+- The ISLES26 manifest carries the exact published slugs/paths and image-kind
+  source allowlist; the opaque fixture remains NIfTI-only.
+- Exactly one MHA, TIFF, `.nii`, or `.nii.gz` resolves correctly according to
+  the selected manifest. Zero or multiple allowed images fail deterministically
+  with counts rather than filenames.
+- `.nii.gz` pass-through does not rewrite the source. `.nii` gzip round-trip is
+  byte-identical after decompression and cleans scratch state.
+- Synthetic MHA/TIFF canonicalization preserves scalar voxel values, shape,
+  spacing, origin, direction, oblique/flipped/permuted geometry where the source
+  format represents it, and asymmetric world-coordinate landmarks.
+- Corrupt, 2D, 4D, vector, nonfinite, or nonrepresentable inputs fail before the
+  case producer.
+- A canonicalized MHA/TIFF record reaches the existing `PreprocessedCaseProducer`
+  through canonical dataset key `T1` and a `.nii.gz` path; no shared-inference
+  API changes to accept GC formats.
+- Stub-runtime tests prove successful and failed startup/invocation logs contain
+  stable event, stage, error/timing, build, policy, interface, and resource keys.
+- Privacy tests inject identifying-looking filenames and metadata values, then
+  assert that neither appears in emitted logs or exception responses.
+- Timing tests use a controllable clock to prove finite nonnegative spans,
+  success summaries, partial failure summaries, and correct stage association
+  without sleeping.
+- Runtime tests prove telemetry is bounded and does not emit per-window events.
+- Container smoke tests invoke the exact built image through the external
+  sidecar using an official-style MHA input and both official outputs, then
+  assert HTTP 201, expected telemetry milestones, complete output validation,
+  and original-source grid identity.
+- The same built image is exercised with the NIfTI-only opaque fixture to retain
+  dataset/interface/transport generality.
+- Failure-injection container tests produce HTTP non-success, no accepted partial
+  output set, and one actionable sanitized failure event.
+- The Desktop live test converts one real non-patient-repository ISLES26 case
+  into physically equivalent MHA/NIfTI representations, invokes the same
+  DynUNet model, compares predictions within a declared tolerance, and verifies
+  both MHA outputs against each original source grid.
+- The relevant GC, inference, loader, evaluation, and training regression suites
+  remain green before supervisory review.
+
+### Acceptance criteria
+
+- The hosted ISLES26 image-kind socket no longer depends on `.nii.gz` being
+  present under `/input`; MHA is converted to canonical `.nii.gz` and TIFF is
+  accepted when it is one scalar 3D image.
+- NIfTI local/fixture inputs remain directly supported, and input
+  canonicalization does not narrow the reusable builder to ISLES26.
+- Source and canonical inputs are physically equivalent before preprocessing;
+  final MHA probability and mask outputs match the original received input grid.
+- No transport conversion reorientation, resampling, intensity processing, or
+  model-space policy leaks outside the registered preprocessing adapter.
+- Temporary canonical files are confined to `/tmp`, cleaned on success/failure,
+  and cannot satisfy a later invocation as stale state.
+- Startup readiness logs establish the exact image/runtime/model/interface/policy
+  state and resource allocation.
+- Every successful invocation reports the required stage durations, total time,
+  peak GPU/host memory, scratch usage, input/output contracts, and validation
+  outcomes.
+- Every failed invocation reports a stable failed stage, error code/type,
+  sanitized actionable detail, partial timing summary, and total elapsed time;
+  `error_type` alone is insufficient.
+- Logs contain no patient filenames, metadata values, tensors, or image contents
+  and remain bounded independently of sliding-window count.
+- The organizer-style MHA lifecycle succeeds from an external sidecar under the
+  hosted 16 GB memory request and 300-second local invoke bound.
+- Both required compressed-MHA outputs are reopened and validated before HTTP
+  201; the existing NIfTI output route remains green.
+- A new independently saved Docker archive is produced and paired with the
+  already valid model archive for the next hosted try-out.
+
+### Rollback
+
+Retain commit `70cc6ca` and the Cut 10A NIfTI fixture evidence as the generic
+container baseline. The known NIfTI-only Cut 10B state may be committed as an
+explicit historical development checkpoint, but its image must not be
+distributed as ISLES26-ready. If the broader image-kind schema or structured
+logging implementation proves unsafe, reduce the implementation to the smallest
+typed MHA-to-NIfTI canonicalizer and stage/error summary that satisfies the
+hosted interface; do not bypass canonical preprocessing, weaken geometry
+validation, embed the model in the image, or remove the already working
+NIfTI/MHA output transports.
+
+---
+
 ## 23. Cut 11: T4 resource qualification and ten-minute certification
 
 ### Context
@@ -2736,7 +3124,7 @@ Successful local correctness does not prove viability on the competition instanc
 
 ### Dependencies
 
-Cuts 0-10B.
+Cuts 0-10B-2.
 
 ### Affected files and components
 
@@ -2748,7 +3136,9 @@ Cuts 0-10B.
 
 ### Desired changes
 
-1. Measure separately:
+1. Consume the mandatory Cut 10B-2 startup/invocation timing schema and, through
+   nonduplicative shared-pipeline observation seams where available, measure
+   separately:
    - container/server startup;
    - model initialization;
    - input read;
@@ -2780,7 +3170,7 @@ Cuts 0-10B.
 ### Expected tests and testing components
 
 - Baseline single-model FP16 prediction stays below 16 GB VRAM with meaningful margin.
-- Host memory remains below 32 GB with meaningful margin.
+- Host memory remains below the hosted 16 GB request with meaningful margin.
 - Worst-case total per-case time remains below the project target and platform limit.
 - Repeated invocations do not show unbounded memory growth.
 - Both MHA outputs are written and reopened on every measured invocation; no
@@ -2916,6 +3306,8 @@ Cut 10A Generic container runtime/image and NIfTI fixture lifecycle
   |
 Cut 10B Official ISLES26 manifest, multi-output MHA, external lifecycle
   |
+Cut 10B-2 Hosted image-input normalization and production observability
+  |
 Cut 11 T4 qualification
   |
 Cut 12 Platform/release closure
@@ -2930,10 +3322,12 @@ fixtures from Cut 7C may be developed earlier after Cut 4, but they do not make
 the umbrella complete without Cuts 7A-7B and 7D-7E. Cut 8 and container release
 work wait for all five Cut 7 subcuts. Cut 8 may be implemented incrementally;
 no optional enhancement blocks a correct baseline container. Cut 10A is a
-fixture-based implementation and evidence boundary. Cut 10B is mandatory
-before Cut 11 so qualification includes the official two-output MHA workload;
-Cut 12 performs hosted/release closure rather than postponing that transport
-implementation.
+fixture-based implementation and evidence boundary. Cut 10B implements the
+official output/socket contract; Cut 10B-2 is its mandatory hosted-input and
+observability correction after the first platform try-out. Both precede Cut 11
+so qualification includes canonicalization, telemetry overhead, and the
+official two-output MHA workload. Cut 12 performs hosted/release closure rather
+than postponing transport implementation.
 
 The current reviewed-but-uncommitted spatial/output implementation maps to Cut
 7C. Any exploratory `_iter_native_model_volume_samples`-style evaluator helper
@@ -3053,12 +3447,20 @@ Exact tolerance should be established in Cut 0. CPU/GPU and FP16/FP32 comparison
 - clean `/tmp` behavior;
 - exact input/output interface paths;
 - arbitrary-slug interface bindings to canonical dataset keys;
+- image-kind discovery and MHA/TIFF/`.nii` canonicalization to downstream
+  `.nii.gz`, with source/canonical physical-geometry equivalence;
+- deterministic zero/multiple-file failures and invocation-local scratch
+  cleanup;
 - official ISLES26 slug bindings to `T1`, `mask`, and `probability` through the
   manifest rather than Python branches;
 - complete two-output MHA materialization and reopened validation before HTTP
   201;
 - preservation of the single-output NIfTI fixture lifecycle;
 - organizer-compatible 300-second local invoke timeout;
+- structured startup/invocation milestone, timing, resource, and sanitized
+  failure-event assertions;
+- privacy regression proving filenames, metadata values, tensors, and image
+  contents are absent from logs;
 - model-dataset adapter availability and raw-to-processed modality compatibility;
 - failure exit/status behavior;
 - saved-image reload test.
@@ -3176,12 +3578,15 @@ A dirty worktree does not automatically prohibit development builds, but competi
 
 ### 28.10 Grand Challenge file-type mismatch
 
-**Risk:** A competition transport requirement is treated as a reason to replace
-the shared NIfTI output architecture, or NIfTI assumptions are applied to an
-official MHA socket.
-**Mitigation:** Preserve and test the existing NIfTI writer; select explicit
-parallel NIfTI/MHA boundary adapters from the interface manifest; never change
-model preprocessing or shared result semantics because of transport format.
+**Risk:** A dataset's original `.nii.gz` representation is confused with the
+platform's image-kind serialization, causing the resolver to reject hosted MHA
+or TIFF before preprocessing. Conversely, a competition output requirement may
+be treated as a reason to replace the shared NIfTI output architecture.
+**Mitigation:** Cut 10B-2 discovers one manifest-allowed image representation,
+canonicalizes it to `.nii.gz` in `/tmp`, and verifies source/canonical physical
+geometry before registered preprocessing. Preserve and test the existing NIfTI
+writer and explicit MHA output adapters; never change trained preprocessing or
+shared result semantics because of transport format.
 
 ### 28.11 Over-aggressive postprocessing
 
@@ -3318,6 +3723,36 @@ Grand Challenge cannot reach port 4743 from its orchestrator.
 the Docker network, retain `0.0.0.0:4743`, reject health redirects, and use the
 organizer's 300-second local invoke bound.
 
+### 28.30 Hosted failure is opaque after an expensive image upload
+
+**Risk:** The container reports only an exception class, so socket inventory,
+active stage, accepted file type, geometry contract, elapsed time, and resource
+state are lost when the platform destroys the case container.
+**Mitigation:** Emit bounded structured `GC_EVENT` startup/invocation milestones,
+stable stage/error codes, sanitized detail, completed/failed stage durations,
+build identity, and resource summaries. Assert those events in success and
+failure container tests before upload.
+
+### 28.31 Telemetry perturbs or floods inference
+
+**Risk:** Per-window logging, repeated CUDA synchronization, unbounded config or
+tensor serialization, or verbose third-party tracebacks consume time/memory and
+may expose sensitive transport values.
+**Mitigation:** Time only bounded enclosing stages with a monotonic clock; emit
+one summary per major stage and no per-window events; log schemas and aggregate
+contracts rather than values; sanitize known failures and report code locations
+without uncontrolled exception payloads.
+
+### 28.32 Input canonicalization exhausts scratch or leaves stale files
+
+**Risk:** MHA/TIFF conversion duplicates a large input under `/tmp`, exceeds the
+scratch allocation, or a failed invocation leaves a canonical NIfTI that a later
+case reuses.
+**Mitigation:** Check and log scratch capacity before conversion, use one
+invocation-local directory, refuse insufficient capacity with an actionable
+error, clean it in success/failure paths, and reprovision `/tmp` during
+organizer-style repeated-invocation tests.
+
 ---
 
 ## 29. Definition of done for this CAP
@@ -3370,6 +3805,13 @@ This CAP is complete only when all of the following are true:
 - [ ] Required stroke metadata fields and documented nullability are validated
   at the transport boundary without entering or conditioning the current model.
 - [ ] Core preprocessing/inference receive canonical dataset keys only; arbitrary competition slug names remain isolated to the GC transport layer.
+- [ ] The ISLES26 image-kind input accepts hosted scalar 3D MHA/TIFF and
+  organizer-local NIfTI representations, canonicalizes non-`.nii.gz` inputs
+  only beneath `/tmp`, and passes a verified `.nii.gz` path to registered
+  preprocessing without reorientation, resampling, or intensity changes.
+- [ ] Source/canonical geometry and asymmetric world-coordinate landmarks agree,
+  and both final MHA outputs are independently verified against the originally
+  received platform input grid.
 - [ ] The official segmentation and probability outputs are both compressed
   MHA files on the identical native T1 physical grid; the segmentation is
   binary `uint8`, while the probability is continuous, finite floating point
@@ -3378,12 +3820,19 @@ This CAP is complete only when all of the following are true:
   been written, reopened, and validated; partial/stale output sets fail.
 - [ ] An external tester sidecar reaches health/invoke on port 4743 and the
   organizer-style local invocation completes within 300 seconds.
+- [ ] Startup and every successful/failed invocation emit bounded privacy-safe
+  structured events with exact build/runtime identity, stage/error outcome,
+  required monotonic stage durations, total elapsed time, and GPU/host/scratch
+  resource summaries; exception type alone is not accepted as diagnostics.
+- [ ] Logs contain no platform-generated patient filename, metadata value,
+  tensor, voxel content, or per-sliding-window event.
 - [ ] A non-ISLES NIfTI fixture remains green, proving transport coexistence
   and preventing the official MHA requirement from narrowing the reusable
   builder/runtime to ISLES26.
 - [ ] Native validation can explicitly and correctly evaluate `model_preprocessed` or `native_input` output against a reference in the same space.
 - [ ] Container diagnostics can exercise either output space, while production `/invoke` accepts only `native_input`.
-- [ ] The exact release candidate passes T4 memory and ten-minute qualification with headroom.
+- [ ] The exact release candidate passes T4 memory and ten-minute qualification
+  with headroom under the hosted 16 GB host-memory request.
 - [ ] At least one Grand Challenge platform try-out succeeds before submission
   and returns both official outputs with independently verified geometry and
   numeric domains.

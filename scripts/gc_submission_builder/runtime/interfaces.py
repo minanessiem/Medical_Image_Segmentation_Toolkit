@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -13,6 +14,10 @@ import yaml
 
 class InterfaceManifestError(ValueError):
     """Raised when platform transport cannot satisfy an explicit interface."""
+
+
+RESULT_KEYS = frozenset({"mask", "probability"})
+TECHNICAL_FIELD_TYPES = frozenset({"string", "integer", "number"})
 
 
 @dataclass(frozen=True)
@@ -25,16 +30,24 @@ class InputBinding:
 
 
 @dataclass(frozen=True)
+class TechnicalFieldSchema:
+    value_type: str
+    nullable: bool
+
+
+@dataclass(frozen=True)
 class TechnicalInputBinding:
     slug: str
     relative_path: str
     file_type: str
     required: bool
+    schema: Mapping[str, TechnicalFieldSchema]
 
 
 @dataclass(frozen=True)
 class OutputBinding:
     slug: str
+    result_key: str
     relative_path: str
     file_type: str
 
@@ -44,7 +57,7 @@ class InterfaceDefinition:
     name: str
     inputs: tuple[InputBinding, ...]
     technical_inputs: tuple[TechnicalInputBinding, ...]
-    output: OutputBinding
+    outputs: tuple[OutputBinding, ...]
 
     @property
     def interface_key(self) -> tuple[str, ...]:
@@ -176,13 +189,15 @@ def resolve_invocation(
         _validate_platform_relative_path(socket_entries[binding.slug], binding)
         location = _resolve_under_root(root, binding.relative_path)
         try:
-            technical_values[binding.slug] = json.loads(
+            value = json.loads(
                 location.read_text(encoding="utf-8")
             )
         except (OSError, json.JSONDecodeError) as exc:
             raise InterfaceManifestError(
                 f"Required technical JSON socket {binding.slug!r} is invalid."
             ) from exc
+        _validate_technical_value(value, binding=binding)
+        technical_values[binding.slug] = value
 
     return ResolvedInvocation(
         interface=interface,
@@ -194,7 +209,7 @@ def resolve_invocation(
 def _parse_interface(value: Any, *, index: int) -> InterfaceDefinition:
     path = f"interfaces[{index}]"
     raw = _mapping(value, path)
-    _unknown(raw, {"name", "inputs", "technical_inputs", "output"}, path)
+    _unknown(raw, {"name", "inputs", "technical_inputs", "outputs"}, path)
     name = _string(raw.get("name"), f"{path}.name")
     raw_inputs = _sequence(raw.get("inputs"), f"{path}.inputs")
     if not raw_inputs:
@@ -211,21 +226,39 @@ def _parse_interface(value: Any, *, index: int) -> InterfaceDefinition:
         _parse_technical(item, path=f"{path}.technical_inputs[{item_index}]")
         for item_index, item in enumerate(raw_technical)
     )
-    output = _parse_output(raw.get("output"), path=f"{path}.output")
+    raw_outputs = _sequence(raw.get("outputs"), f"{path}.outputs")
+    if not raw_outputs:
+        raise InterfaceManifestError(f"{path}.outputs must not be empty.")
+    outputs = tuple(
+        _parse_output(item, path=f"{path}.outputs[{item_index}]")
+        for item_index, item in enumerate(raw_outputs)
+    )
 
-    slugs = [binding.slug for binding in inputs] + [
-        binding.slug for binding in technical
-    ]
+    slugs = (
+        [binding.slug for binding in inputs]
+        + [binding.slug for binding in technical]
+        + [binding.slug for binding in outputs]
+    )
     if len(slugs) != len(set(slugs)):
-        raise InterfaceManifestError(f"{path} input socket slugs must be unique.")
+        raise InterfaceManifestError(f"{path} input/output socket slugs must be unique.")
     keys = [binding.dataset_key for binding in inputs]
     if len(keys) != len(set(keys)):
         raise InterfaceManifestError(f"{path} input dataset_key values must be unique.")
+    result_keys = [binding.result_key for binding in outputs]
+    if len(result_keys) != len(set(result_keys)):
+        raise InterfaceManifestError(f"{path} output result_key values must be unique.")
+    relative_paths = (
+        [binding.relative_path for binding in inputs]
+        + [binding.relative_path for binding in technical]
+        + [binding.relative_path for binding in outputs]
+    )
+    if len(relative_paths) != len(set(relative_paths)):
+        raise InterfaceManifestError(f"{path} interface relative paths must be unique.")
     return InterfaceDefinition(
         name=name,
         inputs=inputs,
         technical_inputs=technical,
-        output=output,
+        outputs=outputs,
     )
 
 
@@ -255,7 +288,11 @@ def _parse_input(value: Any, *, path: str) -> InputBinding:
 
 def _parse_technical(value: Any, *, path: str) -> TechnicalInputBinding:
     raw = _mapping(value, path)
-    _unknown(raw, {"slug", "relative_path", "file_type", "required"}, path)
+    _unknown(
+        raw,
+        {"slug", "relative_path", "file_type", "required", "schema"},
+        path,
+    )
     file_type = _string(raw.get("file_type"), f"{path}.file_type").lower()
     if file_type != "json":
         raise InterfaceManifestError(f"{path}.file_type must be 'json'.")
@@ -272,22 +309,97 @@ def _parse_technical(value: Any, *, path: str) -> TechnicalInputBinding:
         relative_path=_relative_path(raw.get("relative_path"), f"{path}.relative_path"),
         file_type=file_type,
         required=required,
+        schema=_parse_technical_schema(raw.get("schema", {}), path=f"{path}.schema"),
     )
 
 
 def _parse_output(value: Any, *, path: str) -> OutputBinding:
     raw = _mapping(value, path)
-    _unknown(raw, {"slug", "relative_path", "file_type"}, path)
+    _unknown(raw, {"slug", "result_key", "relative_path", "file_type"}, path)
     file_type = _string(raw.get("file_type"), f"{path}.file_type").lower()
-    if file_type != "nifti":
+    if file_type not in {"nifti", "mha"}:
         raise InterfaceManifestError(
-            f"{path}.file_type must be 'nifti' for the current certified transport."
+            f"{path}.file_type must be one of ['mha', 'nifti']."
+        )
+    result_key = _string(raw.get("result_key"), f"{path}.result_key").lower()
+    if result_key not in RESULT_KEYS:
+        raise InterfaceManifestError(
+            f"{path}.result_key must be one of {sorted(RESULT_KEYS)}."
         )
     return OutputBinding(
         slug=_string(raw.get("slug"), f"{path}.slug"),
+        result_key=result_key,
         relative_path=_relative_path(raw.get("relative_path"), f"{path}.relative_path"),
         file_type=file_type,
     )
+
+
+def _parse_technical_schema(
+    value: Any,
+    *,
+    path: str,
+) -> Mapping[str, TechnicalFieldSchema]:
+    raw_schema = _mapping(value, path)
+    parsed: dict[str, TechnicalFieldSchema] = {}
+    for field_name, field_value in raw_schema.items():
+        name = _string(field_name, f"{path} field name")
+        field = _mapping(field_value, f"{path}.{name}")
+        _unknown(field, {"type", "nullable"}, f"{path}.{name}")
+        value_type = _string(field.get("type"), f"{path}.{name}.type").lower()
+        if value_type not in TECHNICAL_FIELD_TYPES:
+            raise InterfaceManifestError(
+                f"{path}.{name}.type must be one of "
+                f"{sorted(TECHNICAL_FIELD_TYPES)}."
+            )
+        nullable = field.get("nullable")
+        if type(nullable) is not bool:
+            raise InterfaceManifestError(f"{path}.{name}.nullable must be a boolean.")
+        parsed[name] = TechnicalFieldSchema(
+            value_type=value_type,
+            nullable=nullable,
+        )
+    return MappingProxyType(parsed)
+
+
+def _validate_technical_value(
+    value: Any,
+    *,
+    binding: TechnicalInputBinding,
+) -> None:
+    if not isinstance(value, Mapping):
+        raise InterfaceManifestError(
+            f"Technical JSON socket {binding.slug!r} must be a mapping."
+        )
+    missing = sorted(set(binding.schema) - set(value))
+    if missing:
+        raise InterfaceManifestError(
+            f"Technical JSON socket {binding.slug!r} is missing required fields: "
+            f"{missing}."
+        )
+    for name, field in binding.schema.items():
+        observed = value[name]
+        if observed is None:
+            if field.nullable:
+                continue
+            raise InterfaceManifestError(
+                f"Technical field {name!r} is not nullable."
+            )
+        if field.value_type == "string":
+            valid = isinstance(observed, str)
+        elif field.value_type == "integer":
+            valid = type(observed) is int
+        else:
+            valid = type(observed) in {int, float}
+        if not valid:
+            raise InterfaceManifestError(
+                f"Technical field {name!r} must be a {field.value_type}."
+            )
+        if field.value_type in {"integer", "number"} and not math.isfinite(
+            float(observed)
+        ):
+            raise InterfaceManifestError(
+                f"Technical field {name!r} must be finite."
+            )
 
 
 def _validate_platform_relative_path(
@@ -382,6 +494,7 @@ __all__ = [
     "OutputBinding",
     "ResolvedInvocation",
     "TechnicalInputBinding",
+    "TechnicalFieldSchema",
     "load_interface_manifest",
     "resolve_invocation",
     "validate_dataset_bindings",

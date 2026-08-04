@@ -44,10 +44,11 @@ def _write_manifest(root: Path, *, dataset_key: str = "T1") -> Path:
         file_type: nifti
         cardinality: one
     technical_inputs: []
-    output:
-      slug: arbitrary-output-socket
-      relative_path: images/output
-      file_type: nifti
+    outputs:
+      - slug: arbitrary-output-socket
+        result_key: mask
+        relative_path: images/output
+        file_type: nifti
 """ % dataset_key,
         encoding="utf-8",
     )
@@ -421,8 +422,13 @@ class TestGcRuntime(unittest.TestCase):
                 "scripts.gc_submission_builder.runtime.inference.predict_preprocessed_case",
                 return_value=object(),
             ) as predict, patch(
-                "scripts.gc_submission_builder.runtime.inference.write_nifti_prediction",
-                return_value={"path": "protected-output", "dtype": "uint8"},
+                "scripts.gc_submission_builder.runtime.inference.materialize_prediction_outputs",
+                return_value={
+                    "arbitrary-output-socket": {
+                        "path": "protected-output",
+                        "dtype": "uint8",
+                    }
+                },
             ):
                 report = runtime.invoke(
                     input_root=input_root,
@@ -433,8 +439,13 @@ class TestGcRuntime(unittest.TestCase):
         self.assertEqual(set(record), {"caseID", "T1"})
         self.assertNotIn("arbitrary-image-socket", record)
         self.assertEqual(record["caseID"], "gc-invocation")
-        self.assertEqual(report.output_validation, {"dtype": "uint8"})
-        self.assertNotIn("path", report.output_validation)
+        self.assertEqual(
+            report.output_validations,
+            {"arbitrary-output-socket": {"dtype": "uint8"}},
+        )
+        self.assertNotIn(
+            "path", report.output_validations["arbitrary-output-socket"]
+        )
         predict.assert_called_once()
 
 

@@ -12,14 +12,19 @@ builder and transport are dataset-agnostic across registered repository datasets
 the saved model config selects the dataset adapter, while a user-supplied interface
 manifest maps arbitrary platform socket slugs to that adapter's canonical raw keys.
 
-## Release gate: official interface values
+## Interface manifests
 
-`configs/interface_manifest.fixture.yaml` is deliberately a development fixture.
-Its socket slugs and relative paths are not an ISLES26 release claim. Before upload,
-replace it with a manifest containing the exact interface values published for the
-active Grand Challenge phase, then rebuild and re-run the container lifecycle.
+`configs/interfaces/isles26.yaml` records the official ISLES26 contract from the
+organizer template pinned by the CAP. It binds `t1-brain-mri` to the registered
+dataset key `T1`, validates the required `stroke-metadata` JSON object, and emits
+both official compressed-MHA outputs: a binary lesion segmentation and its
+continuous probability map.
 
-For the current NIfTI transport, every image socket must contain exactly one
+`configs/interfaces/fixture_single_nifti.yaml` remains an opaque, non-ISLES
+development fixture. It proves that the same runtime can retain the original
+single-output NIfTI transport when a different manifest selects it.
+
+Every current image socket must contain exactly one
 `.nii.gz` file. A manifest input declares:
 
 - `slug`: the opaque Grand Challenge socket identifier;
@@ -29,6 +34,9 @@ For the current NIfTI transport, every image socket must contain exactly one
 Socket slugs never enter shared preprocessing or model inference. The runtime reads
 `/input/inputs.json`, selects the exact configured socket set, and passes only the
 canonical raw-key-to-path mapping to `src.inference` with labels disabled.
+Each manifest output binds an opaque socket slug and relative path to an explicit
+`PredictionResult` key (`mask` or `probability`) and transport type (`nifti` or
+`mha`). Output order is deterministic but carries no semantic meaning.
 
 ## Model archive
 
@@ -70,25 +78,28 @@ bash scripts/gc_submission_builder/container/build.sh
 
 ## Local lifecycle test
 
-The test command starts the image with no network, a read-only root filesystem,
+The test command starts the image on an internal Docker network, a read-only root filesystem,
 read-only input and model mounts, writable `/output`, transient `/tmp`, 32 GB host
-memory, 8 CPUs, and one available GPU. It waits for model initialization, invokes
-the HTTP endpoint from inside the isolated container, and validates the written
-binary `uint8` NIfTI. For the single-input fixture, the external tester also
-reopens the input and output and requires exact shape, affine, qform/sform, and
-form-code agreement.
+memory, 8 CPUs, and one available GPU. A separate tester sidecar on that same
+offline network requires an exact HTTP 200 from `/health` and invokes `/invoke`
+with the organizer's 300-second local timeout. The test then reopens every declared
+output independently. Official MHA outputs must match the native T1 size, spacing,
+origin, direction, and physical landmarks; the fixture NIfTI route retains exact
+shape, affine, qform/sform, and form-code checks.
 
 ```bash
 python3 -m scripts.gc_submission_builder.cli test \
-  --image-tag cut10-dev \
+  --image-tag isles26-dev \
   --model-dir /path/to/extracted/algorithmmodel \
   --input-dir /path/to/platform-shaped/input \
   --test-output-dir /new/empty/output-directory
 ```
 
-The input directory must contain `inputs.json` and the socket directories declared
-by the selected manifest. The output directory must be empty, preventing stale
-predictions from satisfying the test.
+The input directory must contain `inputs.json`, one directory per image socket,
+and any declared technical JSON paths. The output directory must be empty before
+the lifecycle starts. Within an invocation, declared output directories are
+cleared and the full set is staged, moved, reopened, and validated before HTTP 201;
+a failed partial write is removed rather than reported as success.
 
 ## Save and combined build
 
@@ -131,5 +142,7 @@ only beneath the separately mounted `/diagnostic` tree.
 
 Desktop container smoke tests establish code, dependency, transport, and spatial
 behavior. They do not certify AWS T4 peak memory or the ten-minute case deadline;
-those measurements belong to the following resource-certification cut. Likewise,
-the fixture manifest does not satisfy the final official-interface release gate.
+those measurements belong to the following resource-certification cut. The
+official manifest and two-output lifecycle satisfy Cut 10B's interface boundary;
+upload readiness still depends on Cut 11 resource certification and the final
+platform dry run in Cut 12.

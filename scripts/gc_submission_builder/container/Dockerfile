@@ -1,6 +1,6 @@
 FROM pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime@sha256:f894dae26e1ee8557c544f9cfdb9dc011b1552bf3c1e656b422f2e221d380e40
 
-ARG INTERFACE_MANIFEST=scripts/gc_submission_builder/configs/interface_manifest.fixture.yaml
+ARG INTERFACE_MANIFEST=scripts/gc_submission_builder/configs/interfaces/isles26.yaml
 
 LABEL org.grand-challenge.api-method="invoke"
 

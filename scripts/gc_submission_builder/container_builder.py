@@ -10,11 +10,13 @@ import shutil
 import subprocess
 import tempfile
 from time import monotonic, sleep
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 import nibabel as nib
 import numpy as np
+import SimpleITK as sitk
 
 from scripts.gc_submission_builder.container_config import (
     PROJECT_ROOT,
@@ -22,6 +24,7 @@ from scripts.gc_submission_builder.container_config import (
 )
 from scripts.gc_submission_builder.release_manifest import sha256_file
 from scripts.gc_submission_builder.runtime.interfaces import (
+    OutputBinding,
     load_interface_manifest,
     resolve_invocation,
 )
@@ -30,6 +33,7 @@ from scripts.gc_submission_builder.runtime.interfaces import (
 CONTAINER_BUILD_REPORT_NAME = "container_build_report.json"
 GRAND_CHALLENGE_LABEL = "org.grand-challenge.api-method"
 MODEL_WEIGHT_SUFFIXES = (".pth", ".pt", ".ckpt")
+LOCAL_INVOKE_TIMEOUT_SECONDS = 300
 
 
 class ContainerBuildError(RuntimeError):
@@ -56,11 +60,10 @@ class ContainerBuildResult:
 class ContainerTestResult:
     image_reference: str
     interface_name: str
-    output_path: Path
-    output_shape: tuple[int, int, int]
-    output_dtype: str
-    output_values: tuple[int, ...]
+    output_paths: Mapping[str, Path]
+    output_validations: Mapping[str, Mapping[str, Any]]
     geometry_matches_native_input: bool | None
+    external_http_tested: bool
     non_root_uid: int
     runtime_log: str
 
@@ -161,14 +164,13 @@ def test_container_image(
         )
     manifest = load_interface_manifest(config.interface_manifest_path)
     invocation = resolve_invocation(manifest, input_root)
-    output_path = (
-        output_root
-        / Path(*invocation.interface.output.relative_path.split("/"))
-        / "output.nii.gz"
-    )
     container_name = f"gc-smoke-{uuid4().hex[:12]}"
+    network_name = f"{container_name}-network"
     started = False
+    network_created = False
     try:
+        _run(["docker", "network", "create", "--internal", network_name])
+        network_created = True
         run_command = [
             "docker",
             "run",
@@ -176,7 +178,7 @@ def test_container_image(
             "--name",
             container_name,
             "--network",
-            "none",
+            network_name,
             "--read-only",
             "--memory",
             "32g",
@@ -198,7 +200,12 @@ def test_container_image(
         ]
         _run(run_command)
         started = True
-        _wait_for_health(container_name, timeout_seconds=readiness_timeout_seconds)
+        _wait_for_health(
+            container_name,
+            image_reference=config.image_reference,
+            network_name=network_name,
+            timeout_seconds=readiness_timeout_seconds,
+        )
         uid_result = _run(
             ["docker", "exec", container_name, "id", "-u"],
             capture_output=True,
@@ -209,23 +216,23 @@ def test_container_image(
             raise ContainerBuildError("Could not verify the container runtime UID.") from exc
         if uid == 0:
             raise ContainerBuildError("Smoke-test container is running as root.")
-        _invoke_inside_container(container_name)
-        if not output_path.is_file():
-            raise ContainerBuildError("HTTP 201 returned without the declared output file.")
-        image = nib.load(str(output_path))
-        values = tuple(int(value) for value in np.unique(np.asarray(image.dataobj)))
-        if image.get_data_dtype() != np.dtype(np.uint8) or any(
-            value not in (0, 1) for value in values
-        ):
-            raise ContainerBuildError(
-                "Container output must be a binary uint8 NIfTI segmentation."
-            )
+        _invoke_from_sidecar(
+            container_name,
+            image_reference=config.image_reference,
+            network_name=network_name,
+            timeout_seconds=LOCAL_INVOKE_TIMEOUT_SECONDS,
+        )
+        output_paths, output_validations = validate_single_input_output_set(
+            bindings=invocation.interface.outputs,
+            output_root=output_root,
+            input_path=(
+                next(iter(invocation.raw_modalities.values()))
+                if len(invocation.raw_modalities) == 1
+                else None
+            ),
+        )
         geometry_matches_native_input: bool | None = None
         if len(invocation.raw_modalities) == 1:
-            validate_single_input_nifti_output(
-                output_path=output_path,
-                input_path=next(iter(invocation.raw_modalities.values())),
-            )
             geometry_matches_native_input = True
         runtime_logs = _run(
             ["docker", "logs", container_name],
@@ -234,17 +241,23 @@ def test_container_image(
         return ContainerTestResult(
             image_reference=config.image_reference,
             interface_name=invocation.interface.name,
-            output_path=output_path,
-            output_shape=tuple(int(value) for value in image.shape),
-            output_dtype="uint8",
-            output_values=values,
+            output_paths=MappingProxyType(output_paths),
+            output_validations=MappingProxyType(
+                {
+                    slug: MappingProxyType(validation)
+                    for slug, validation in output_validations.items()
+                }
+            ),
             geometry_matches_native_input=geometry_matches_native_input,
+            external_http_tested=True,
             non_root_uid=uid,
             runtime_log=_combined_output(runtime_logs),
         )
     finally:
         if started:
             _run(["docker", "rm", "--force", container_name], check=False)
+        if network_created:
+            _run(["docker", "network", "rm", network_name], check=False)
 
 
 def save_container_image(config: ContainerBuildConfig) -> Path:
@@ -306,6 +319,122 @@ def validate_single_input_nifti_output(
         ("sform", output.get_sform(coded=True), native_input.get_sform(coded=True)),
     ):
         _validate_nifti_form(name, output_form, input_form)
+
+
+def validate_single_input_output_set(
+    *,
+    bindings: Sequence[OutputBinding],
+    output_root: str | Path,
+    input_path: str | Path | None,
+) -> tuple[dict[str, Path], dict[str, Mapping[str, Any]]]:
+    """Independently reopen every declared output and verify its transport contract."""
+
+    root = Path(output_root).expanduser().resolve()
+    paths: dict[str, Path] = {}
+    validations: dict[str, Mapping[str, Any]] = {}
+    reference = None
+    if input_path is not None:
+        try:
+            reference = sitk.ReadImage(str(Path(input_path).expanduser().resolve()))
+        except Exception as exc:
+            raise ContainerBuildError(
+                "Could not reopen the sole native input for output-set validation."
+            ) from exc
+    for binding in bindings:
+        extension = "output.nii.gz" if binding.file_type == "nifti" else "output.mha"
+        path = root / Path(*binding.relative_path.split("/")) / extension
+        if not path.is_file():
+            raise ContainerBuildError(
+                f"HTTP 201 returned without output socket {binding.slug!r}."
+            )
+        if binding.file_type == "nifti":
+            if binding.result_key != "mask":
+                raise ContainerBuildError(
+                    "Independent NIfTI validation currently supports mask results only."
+                )
+            if input_path is not None:
+                validate_single_input_nifti_output(
+                    output_path=path,
+                    input_path=input_path,
+                )
+            image = nib.load(str(path))
+            array = np.asarray(image.dataobj)
+            if image.get_data_dtype() != np.dtype(np.uint8) or not set(
+                np.unique(array)
+            ).issubset({0, 1}):
+                raise ContainerBuildError("NIfTI mask output must be binary uint8.")
+            validation = {
+                "result_key": "mask",
+                "file_type": "nifti",
+                "shape": list(image.shape),
+                "dtype": "uint8",
+                "spatial_validation": "passed" if reference is not None else None,
+            }
+        else:
+            validation = _validate_mha_output(
+                path,
+                result_key=binding.result_key,
+                reference=reference,
+            )
+        paths[binding.slug] = path
+        validations[binding.slug] = validation
+    return paths, validations
+
+
+def _validate_mha_output(
+    path: Path,
+    *,
+    result_key: str,
+    reference: sitk.Image | None,
+) -> Mapping[str, Any]:
+    try:
+        image = sitk.ReadImage(str(path))
+        array = sitk.GetArrayFromImage(image)
+    except Exception as exc:
+        raise ContainerBuildError("Could not reopen declared MHA output.") from exc
+    if image.GetDimension() != 3:
+        raise ContainerBuildError("Declared MHA output must be 3D.")
+    if result_key == "mask":
+        if array.dtype != np.dtype(np.uint8) or not set(np.unique(array)).issubset(
+            {0, 1}
+        ):
+            raise ContainerBuildError("MHA mask output must be binary uint8.")
+    elif result_key == "probability":
+        if array.dtype != np.dtype(np.float32):
+            raise ContainerBuildError("MHA probability output must be float32.")
+        if not np.isfinite(array).all() or np.any((array < 0) | (array > 1)):
+            raise ContainerBuildError(
+                "MHA probability output must be finite and constrained to [0, 1]."
+            )
+    else:
+        raise ContainerBuildError(f"Unknown output result_key={result_key!r}.")
+    if reference is not None:
+        for name, observed, expected in (
+            ("size", image.GetSize(), reference.GetSize()),
+            ("spacing", image.GetSpacing(), reference.GetSpacing()),
+            ("origin", image.GetOrigin(), reference.GetOrigin()),
+            ("direction", image.GetDirection(), reference.GetDirection()),
+        ):
+            if not np.allclose(observed, expected, rtol=0, atol=1e-5):
+                raise ContainerBuildError(
+                    f"MHA output {name} does not match the sole native input."
+                )
+        _validate_world_coordinate_landmarks(image, reference)
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(65536).split(b"ElementDataFile", 1)[0]
+    except OSError as exc:
+        raise ContainerBuildError("Could not inspect MHA compression header.") from exc
+    if b"CompressedData = True" not in header:
+        raise ContainerBuildError("MHA output must use embedded compression.")
+    return {
+        "result_key": result_key,
+        "file_type": "mha",
+        "shape": list(reversed(array.shape)),
+        "dtype": str(array.dtype),
+        "spatial_validation": "passed" if reference is not None else None,
+        "compressed": True,
+    }
 
 
 def _audit_image_model_payload(image_reference: str) -> None:
@@ -382,21 +511,52 @@ def _validate_nifti_form(
         )
 
 
-def _wait_for_health(container_name: str, *, timeout_seconds: int) -> None:
+def _validate_world_coordinate_landmarks(
+    observed: sitk.Image,
+    expected: sitk.Image,
+) -> None:
+    size = expected.GetSize()
+    landmarks = {
+        (0, 0, 0),
+        tuple(max(int(length) - 1, 0) for length in size),
+        tuple(max((int(length) - 1) // 2, 0) for length in size),
+    }
+    for index in landmarks:
+        observed_point = observed.TransformIndexToPhysicalPoint(index)
+        expected_point = expected.TransformIndexToPhysicalPoint(index)
+        if not np.allclose(observed_point, expected_point, rtol=0, atol=1e-5):
+            raise ContainerBuildError(
+                "MHA output world-coordinate landmarks do not match the sole "
+                "native input."
+            )
+
+
+def _wait_for_health(
+    container_name: str,
+    *,
+    image_reference: str,
+    network_name: str,
+    timeout_seconds: int,
+) -> None:
     deadline = monotonic() + timeout_seconds
-    code = (
-        "import urllib.request; "
-        "r=urllib.request.urlopen('http://127.0.0.1:4743/health', timeout=2); "
-        "raise SystemExit(0 if r.status == 200 else 1)"
-    )
     while monotonic() < deadline:
-        result = _run(
-            ["docker", "exec", container_name, "python", "-c", code],
-            check=False,
-            capture_output=True,
+        result = _run_http_sidecar(
+            container_name=container_name,
+            image_reference=image_reference,
+            network_name=network_name,
+            method="GET",
+            path="/health",
+            expected_status=200,
+            timeout_seconds=2,
         )
         if result.returncode == 0:
             return
+        observed_status = result.stdout.strip()
+        if observed_status.isdigit():
+            raise ContainerBuildError(
+                "Container /health must return exact HTTP 200 without redirect; "
+                f"observed_status={observed_status}."
+            )
         status = _run(
             ["docker", "inspect", "--format", "{{.State.Running}}", container_name],
             check=False,
@@ -418,17 +578,21 @@ def _wait_for_health(container_name: str, *, timeout_seconds: int) -> None:
     )
 
 
-def _invoke_inside_container(container_name: str) -> None:
-    code = (
-        "import urllib.request; "
-        "q=urllib.request.Request('http://127.0.0.1:4743/invoke', data=b'', method='POST'); "
-        "r=urllib.request.urlopen(q, timeout=610); "
-        "raise SystemExit(0 if r.status == 201 else 1)"
-    )
-    result = _run(
-        ["docker", "exec", container_name, "python", "-c", code],
-        check=False,
-        capture_output=True,
+def _invoke_from_sidecar(
+    container_name: str,
+    *,
+    image_reference: str,
+    network_name: str,
+    timeout_seconds: int,
+) -> None:
+    result = _run_http_sidecar(
+        container_name=container_name,
+        image_reference=image_reference,
+        network_name=network_name,
+        method="POST",
+        path="/invoke",
+        expected_status=201,
+        timeout_seconds=timeout_seconds,
     )
     if result.returncode != 0:
         logs = _run(
@@ -439,8 +603,58 @@ def _invoke_inside_container(container_name: str) -> None:
         raise ContainerBuildError(
             "Container /invoke lifecycle failed; "
             "error_type=HttpInvocationFailure, "
+            f"sidecar_output={_combined_output(result)[-500:]!r}, "
             f"log_tail={_combined_output(logs)[-2000:]!r}."
         )
+
+
+def _run_http_sidecar(
+    *,
+    container_name: str,
+    image_reference: str,
+    network_name: str,
+    method: str,
+    path: str,
+    expected_status: int,
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    """Call the service from a separate container without following redirects."""
+
+    code = (
+        "import http.client,sys; "
+        "connection=http.client.HTTPConnection(sys.argv[1],4743,"
+        "timeout=float(sys.argv[4])); "
+        "connection.request(sys.argv[2],sys.argv[3],body=b'' if "
+        "sys.argv[2]=='POST' else None); "
+        "response=connection.getresponse(); response.read(); "
+        "print(response.status); "
+        "raise SystemExit(0 if response.status==int(sys.argv[5]) else 22)"
+    )
+    return _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            network_name,
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=67108864",
+            "--entrypoint",
+            "python",
+            image_reference,
+            "-c",
+            code,
+            container_name,
+            method,
+            path,
+            str(timeout_seconds),
+            str(expected_status),
+        ],
+        check=False,
+        capture_output=True,
+        timeout_seconds=timeout_seconds + 5,
+    )
 
 
 def _required_directory(value: str | Path, field: str) -> Path:
@@ -468,6 +682,7 @@ def _run(
     *,
     check: bool = True,
     capture_output: bool = False,
+    timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -475,7 +690,14 @@ def _run(
             check=check,
             capture_output=capture_output,
             text=True,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise ContainerBuildError(
+            "Container command exceeded its external timeout; "
+            f"timeout_seconds={timeout_seconds}, "
+            f"command={' '.join(str(value) for value in command[:4])}."
+        ) from exc
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ContainerBuildError(
             f"Container command failed: {' '.join(str(value) for value in command[:4])}"
@@ -484,6 +706,7 @@ def _run(
 
 __all__ = [
     "CONTAINER_BUILD_REPORT_NAME",
+    "LOCAL_INVOKE_TIMEOUT_SECONDS",
     "ContainerBuildError",
     "ContainerBuildResult",
     "ContainerImageInspection",
@@ -492,5 +715,6 @@ __all__ = [
     "inspect_container_image",
     "save_container_image",
     "test_container_image",
+    "validate_single_input_output_set",
     "validate_single_input_nifti_output",
 ]

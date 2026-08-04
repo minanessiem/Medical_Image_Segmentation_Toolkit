@@ -121,7 +121,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     readiness_timeout_seconds=args.readiness_timeout_seconds,
                 )
                 print("Grand Challenge container lifecycle passed")
-                print(f"Output:              {test_result.output_path}")
+                for slug, output_path in test_result.output_paths.items():
+                    print(f"Output [{slug}]: {output_path}")
                 if test_result.runtime_log.strip():
                     print("Container runtime log:")
                     print(test_result.runtime_log.rstrip())

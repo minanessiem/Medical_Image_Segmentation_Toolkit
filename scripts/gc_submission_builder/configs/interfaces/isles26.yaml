@@ -1,0 +1,32 @@
+interfaces:
+  - name: isles26
+    inputs:
+      - slug: t1-brain-mri
+        dataset_key: T1
+        relative_path: images/t1-brain-mri
+        file_type: nifti
+        cardinality: one
+    technical_inputs:
+      - slug: stroke-metadata
+        relative_path: stroke-metadata.json
+        file_type: json
+        required: true
+        schema:
+          CENTER:
+            type: string
+            nullable: true
+          CHRONICITY:
+            type: integer
+            nullable: true
+          DAYS_POST_STROKE:
+            type: number
+            nullable: true
+    outputs:
+      - slug: stroke-lesion-segmentation
+        result_key: mask
+        relative_path: images/stroke-lesion-segmentation
+        file_type: mha
+      - slug: lesion-probability-map
+        result_key: probability
+        relative_path: images/lesion-probability-map
+        file_type: mha

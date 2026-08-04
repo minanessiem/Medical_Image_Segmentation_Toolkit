@@ -17,7 +17,7 @@ from scripts.gc_submission_builder.release_manifest import verify_artifact_manif
 from scripts.gc_submission_builder.runtime.image_io import (
     NiftiInputInspection,
     inspect_nifti_input,
-    write_nifti_prediction,
+    materialize_prediction_outputs,
 )
 from scripts.gc_submission_builder.runtime.interfaces import (
     InterfaceDefinition,
@@ -64,7 +64,7 @@ class GcInvocationReport:
 
     interface_name: str
     input_inspections: Mapping[str, NiftiInputInspection]
-    output_validation: Mapping[str, Any]
+    output_validations: Mapping[str, Mapping[str, Any]]
     elapsed_seconds: float
     peak_cuda_memory_bytes: int | None
 
@@ -103,27 +103,35 @@ class GcInferenceRuntime:
 
         prediction = self.predict(input_root=input_root)
         writer_started = perf_counter()
-        output = write_nifti_prediction(
+        outputs = materialize_prediction_outputs(
             prediction.result,
             output_root=output_root,
-            binding=prediction.interface.output,
+            bindings=prediction.interface.outputs,
         )
         elapsed = prediction.elapsed_seconds + (perf_counter() - writer_started)
-        safe_output = {
-            key: value
-            for key, value in output.items()
-            if key != "path"
+        safe_outputs = {
+            slug: {
+                key: value
+                for key, value in validation.items()
+                if key != "path"
+            }
+            for slug, validation in outputs.items()
         }
         report = GcInvocationReport(
             interface_name=prediction.interface.name,
             input_inspections=prediction.input_inspections,
-            output_validation=MappingProxyType(safe_output),
+            output_validations=MappingProxyType(
+                {
+                    slug: MappingProxyType(validation)
+                    for slug, validation in safe_outputs.items()
+                }
+            ),
             elapsed_seconds=float(elapsed),
             peak_cuda_memory_bytes=prediction.peak_cuda_memory_bytes,
         )
         LOGGER.info(
             "GC invocation completed interface=%s dataset=%s runtime=%s "
-            "input_contracts=%s output=%s elapsed_seconds=%.3f "
+            "input_contracts=%s outputs=%s elapsed_seconds=%.3f "
             "peak_cuda_memory_bytes=%s",
             report.interface_name,
             self.case_producer.adapter.dataset_id,
@@ -132,7 +140,10 @@ class GcInferenceRuntime:
                 key: asdict(inspection)
                 for key, inspection in report.input_inspections.items()
             },
-            dict(report.output_validation),
+            {
+                slug: dict(validation)
+                for slug, validation in report.output_validations.items()
+            },
             report.elapsed_seconds,
             report.peak_cuda_memory_bytes,
         )

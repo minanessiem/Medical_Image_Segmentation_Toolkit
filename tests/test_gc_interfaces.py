@@ -44,11 +44,14 @@ class TestGcInterfaces(unittest.TestCase):
                                 }
                             ],
                             "technical_inputs": [],
-                            "output": {
-                                "slug": "opaque-fixture-segmentation",
-                                "relative_path": "images/fixture-output",
-                                "file_type": "nifti",
-                            },
+                            "outputs": [
+                                {
+                                    "slug": "opaque-fixture-segmentation",
+                                    "result_key": "mask",
+                                    "relative_path": "images/fixture-output",
+                                    "file_type": "nifti",
+                                }
+                            ],
                         }
                     ]
                 },
@@ -217,6 +220,9 @@ class TestGcInterfaces(unittest.TestCase):
                     "relative_path": "technical/parameters.json",
                     "file_type": "json",
                     "required": True,
+                    "schema": {
+                        "field_strength_t": {"type": "number", "nullable": False}
+                    },
                 }
             ]
             path.write_text(yaml.safe_dump(payload), encoding="utf-8")
@@ -244,6 +250,197 @@ class TestGcInterfaces(unittest.TestCase):
             {"field_strength_t": 3.0},
         )
         self.assertNotIn("opaque-technical-parameters", invocation.raw_modalities)
+
+    def test_official_manifest_declares_exact_result_bindings_and_nullable_schema(self):
+        manifest = load_interface_manifest(
+            Path(
+                "scripts/gc_submission_builder/configs/interfaces/isles26.yaml"
+            )
+        )
+
+        self.assertEqual(len(manifest.interfaces), 1)
+        interface = manifest.interfaces[0]
+        self.assertEqual(interface.interface_key, ("stroke-metadata", "t1-brain-mri"))
+        self.assertEqual(
+            [(binding.slug, binding.dataset_key) for binding in interface.inputs],
+            [("t1-brain-mri", "T1")],
+        )
+        self.assertEqual(
+            [
+                (binding.slug, binding.result_key, binding.file_type)
+                for binding in interface.outputs
+            ],
+            [
+                ("stroke-lesion-segmentation", "mask", "mha"),
+                ("lesion-probability-map", "probability", "mha"),
+            ],
+        )
+        schema = interface.technical_inputs[0].schema
+        self.assertEqual(set(schema), {"CENTER", "CHRONICITY", "DAYS_POST_STROKE"})
+        self.assertTrue(all(field.nullable for field in schema.values()))
+
+    def test_output_bindings_are_explicit_unique_and_do_not_accept_legacy_singular_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._write_manifest(root)
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+            output = payload["interfaces"][0]["outputs"][0]
+
+            for field, value, message in (
+                ("slug", output["slug"], "output socket slugs"),
+                ("result_key", output["result_key"], "result_key"),
+                ("relative_path", output["relative_path"], "relative paths"),
+            ):
+                duplicate = dict(output)
+                duplicate.update(
+                    {
+                        "slug": "second-output",
+                        "result_key": "probability",
+                        "relative_path": "images/second-output",
+                        "file_type": "mha",
+                    }
+                )
+                duplicate[field] = value
+                payload["interfaces"][0]["outputs"].append(duplicate)
+                path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+                with self.assertRaisesRegex(InterfaceManifestError, message):
+                    load_interface_manifest(path)
+                payload["interfaces"][0]["outputs"].pop()
+
+            payload["interfaces"][0]["outputs"][0]["result_key"] = "logits"
+            path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+            with self.assertRaisesRegex(InterfaceManifestError, "result_key"):
+                load_interface_manifest(path)
+
+            legacy = self._write_manifest(root, slug="legacy-output")
+            payload = yaml.safe_load(legacy.read_text(encoding="utf-8"))
+            payload["interfaces"][0]["output"] = payload["interfaces"][0].pop(
+                "outputs"
+            )[0]
+            legacy.write_text(yaml.safe_dump(payload), encoding="utf-8")
+            with self.assertRaisesRegex(InterfaceManifestError, "unknown keys.*output"):
+                load_interface_manifest(legacy)
+
+    def test_official_metadata_schema_accepts_nulls_and_ignores_unconsumed_extras(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = load_interface_manifest(
+                Path(
+                    "scripts/gc_submission_builder/configs/interfaces/isles26.yaml"
+                )
+            )
+            input_root = root / "input"
+            image_dir = input_root / "images" / "t1-brain-mri"
+            image_dir.mkdir(parents=True)
+            nib.save(
+                nib.Nifti1Image(np.zeros((3, 4, 5), dtype=np.float32), np.eye(4)),
+                image_dir / "case.nii.gz",
+            )
+            metadata_path = input_root / "stroke-metadata.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "CENTER": None,
+                        "CHRONICITY": None,
+                        "DAYS_POST_STROKE": None,
+                        "future_transport_field": "ignored",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (input_root / "inputs.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "socket": {
+                                "slug": "t1-brain-mri",
+                                "relative_path": "images/t1-brain-mri",
+                            }
+                        },
+                        {
+                            "socket": {
+                                "slug": "stroke-metadata",
+                                "relative_path": "stroke-metadata.json",
+                            }
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            invocation = resolve_invocation(manifest, input_root)
+
+        self.assertEqual(tuple(invocation.raw_modalities), ("T1",))
+        self.assertIsNone(invocation.technical_inputs["stroke-metadata"]["CENTER"])
+
+    def test_official_metadata_schema_rejects_missing_wrong_and_nonfinite_values(self):
+        manifest_path = Path(
+            "scripts/gc_submission_builder/configs/interfaces/isles26.yaml"
+        )
+        invalid_values = (
+            ({"CENTER": "R1", "CHRONICITY": 1}, "missing required fields"),
+            (
+                {
+                    "CENTER": 7,
+                    "CHRONICITY": 1,
+                    "DAYS_POST_STROKE": 2.5,
+                },
+                "CENTER.*string",
+            ),
+            (
+                {
+                    "CENTER": "R1",
+                    "CHRONICITY": True,
+                    "DAYS_POST_STROKE": 2.5,
+                },
+                "CHRONICITY.*integer",
+            ),
+            (
+                {
+                    "CENTER": "R1",
+                    "CHRONICITY": 1,
+                    "DAYS_POST_STROKE": float("nan"),
+                },
+                "DAYS_POST_STROKE.*finite",
+            ),
+            (["not", "an", "object"], "must be a mapping"),
+        )
+        for metadata, message in invalid_values:
+            with self.subTest(metadata=metadata):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    manifest = load_interface_manifest(manifest_path)
+                    input_root = root / "input"
+                    image_dir = input_root / "images" / "t1-brain-mri"
+                    image_dir.mkdir(parents=True)
+                    nib.save(
+                        nib.Nifti1Image(np.zeros((3, 4, 5)), np.eye(4)),
+                        image_dir / "case.nii.gz",
+                    )
+                    (input_root / "stroke-metadata.json").write_text(
+                        json.dumps(metadata), encoding="utf-8"
+                    )
+                    (input_root / "inputs.json").write_text(
+                        json.dumps(
+                            [
+                                {
+                                    "socket": {
+                                        "slug": "t1-brain-mri",
+                                        "relative_path": "images/t1-brain-mri",
+                                    }
+                                },
+                                {
+                                    "socket": {
+                                        "slug": "stroke-metadata",
+                                        "relative_path": "stroke-metadata.json",
+                                    }
+                                },
+                            ]
+                        ),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(InterfaceManifestError, message):
+                        resolve_invocation(manifest, input_root)
 
 
 if __name__ == "__main__":

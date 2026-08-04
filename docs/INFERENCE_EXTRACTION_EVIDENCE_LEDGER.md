@@ -19,9 +19,9 @@ and E008 are retained only as compact supersession records because they do not
 represent accepted current designs. E016 retains the exploratory,
 pre-decomposition Cut 7 restoration evidence. E017 records the completed Cut
 7E verification of the finalized Cut 7A-7D architecture. E018 records the
-pre-closure Cut 10A Desktop lifecycle, while E019 records the tightened Cut
-10A closure state under supervisory review. The official Cut 10B interface,
-Cut 11 T4 qualification, and Cut 12 platform/release gates remain open.
+pre-closure Cut 10A Desktop lifecycle, E019 records the committed Cut 10A
+closure state, and E020 records the official Cut 10B interface reconciliation.
+Cut 11 T4 qualification and Cut 12 platform/release gates remain open.
 
 ## Operating rule
 
@@ -2332,7 +2332,7 @@ container build/test/save implementation invalidate the corresponding evidence.
 | Field | Value |
 |---|---|
 | Evidence ID | `E019` |
-| Status | `PASS` for bounded Cut 10A closure; pending supervisory review/commit |
+| Status | `PASS` for bounded Cut 10A closure; committed as `70cc6caae0a88a140e771d8cf3aa1b593510b313` |
 | Base commit | `8d4f87851fd812ae43a5dac8392372544f64aab2` plus the uncommitted final Cut 10A overlay |
 | Environment | Desktop WSL/Docker, NVIDIA GeForce RTX 4070 Ti SUPER, model FP32 |
 
@@ -2440,6 +2440,187 @@ qualification. Cut 12 owns hosted-platform try-out and release closure. Changes
 to the audited image contents, runtime policy composition, diagnostic boundary,
 HTTP application, NIfTI lifecycle validation, image build/save implementation,
 or the pinned E018 model/input invalidate the corresponding portion of E019.
+
+---
+
+## Evidence item E020: Cut 10B official ISLES26 interface reconciliation
+
+### Status and supersession
+
+| Field | Value |
+|---|---|
+| Evidence ID | `E020` |
+| Status | `PASS` for Cut 10B implementation and Desktop lifecycle; pending supervisory review/commit |
+| Base commit | `70cc6caae0a88a140e771d8cf3aa1b593510b313` plus the uncommitted Cut 10B overlay |
+| Environment | Desktop WSL/Docker, NVIDIA GeForce RTX 4070 Ti SUPER, model FP32 |
+
+E020 supersedes E019 only for the interface manifest, output set, MHA
+transport, and external HTTP-probe evidence. E019 remains the historical Cut
+10A proof for the generic image boundary, model-independent build, diagnostic
+path, and original NIfTI lifecycle at its exact source state.
+
+### Question being answered
+
+E020 asks whether the generic Cut 10A image can be reconciled with official
+ISLES26 template commit
+`5e25bfc36b1dc6d9c04c8c364f53fb75c6afad32` without creating a second
+prediction path: accept the exact T1 and metadata input sockets, validate the
+published nullable metadata fields without conditioning the model, derive both
+official outputs from one restored `PredictionResult`, write them as compressed
+MHA on the native T1 grid, and return HTTP 201 only after the complete output
+set validates. It also asks whether HTTP is exercised from outside the
+algorithm container with a 300-second local invoke bound while both containers
+remain on an internal, no-internet Docker network.
+
+### Pinned code and image state
+
+The isolated Desktop worktree is:
+
+```text
+/mnt/c/Users/minanessiem/Development/codex_test_worktrees/cut10b_20260804a/
+```
+
+It is detached at committed Cut 10A state
+`70cc6caae0a88a140e771d8cf3aa1b593510b313` with the exact uncommitted Cut
+10B overlay under review. The official image is
+`medseg-diffusion-gc:cut10b-dev`, image ID
+`sha256:5f5f87e2b401cb2cea66ac2900c22224a9d5bf36bce967446bd292be565c3030`.
+Its build report retains `linux/amd64`, non-root `algorithm:algorithm`, API
+method `invoke`, and the no-embedded-model audit:
+
+```text
+cut10b_live_artifacts_20260804a/image_build/container_build_report.json
+af44417b6f67ff9e170462d9fc6c61d237450f91f7cc267cfc467efc28e9ccea
+```
+
+The base-image digest and dependency lock are unchanged from E019. Current
+transport-boundary hashes are:
+
+```text
+7de961b2a4ff90aab3baf79c3fa156cea0008b02d5d141e27af06cb06c867d45  Dockerfile
+60091acb5f6512a04b713d01f4170bf679fd1b3154a00e200766fbd9e420ba83  requirements.lock
+d676aca5ecb753a8e81b00cda0c1f8d5875346e974ae1df850e5e52f7a277db2  interfaces/isles26.yaml
+2b98514d5067c3d39ac3e0c61e1a2b09b16bd964d01a788c68924d70b261af0b  interfaces/fixture_single_nifti.yaml
+```
+
+### Pinned model/config/input state
+
+The live lifecycle reused the E018/E019 p5n1 DynUNet artifact without
+repackaging or mutation. Its checkpoint, resolved config, and standalone FP32
+native-output inference-policy hashes remain those recorded in E018. The same
+non-patient synthetic NIfTI was placed beneath the official input path; its
+shape, anisotropic spacing, ALS orientation, permutation, translation, qform,
+and sform therefore remain unchanged:
+
+```text
+cut10b_live_artifacts_20260804a/input/images/t1-brain-mri/synthetic-t1.nii.gz
+1dc4ad45094f6fe4e9c5bb02d510cafddbf19a14551d9709b94e7b0a3b60cfd7
+```
+
+`inputs.json` declared exactly `t1-brain-mri` and `stroke-metadata`; the
+metadata fixture supplied null values for `CENTER`, `CHRONICITY`, and
+`DAYS_POST_STROKE`, exercising the organizer-documented nullable contract.
+
+### Execution environment and commands
+
+The Desktop `MedSegDiff_env` ran the focused and dependency-wide tests. The
+image builder then selected `configs/interfaces/isles26.yaml`, mounted the
+unchanged model and input read-only, allocated writable `/output` plus bounded
+tmpfs, and started the algorithm non-root on a newly created Docker network
+using `docker network create --internal`. Health and invoke requests came from
+a separate ephemeral tester container on that network, not from `docker exec`;
+the client uses `http.client` so redirects are not followed and requires exact
+status 200/201. The invoke request and its host-side process guard were bounded
+at 300 and 305 seconds respectively.
+
+The relevant regression matrix was:
+
+```bash
+python -m unittest discover -s tests -p 'test_inference_*.py' -q
+python -m unittest discover -s tests -p 'test_evaluation_*.py' -q
+python -m unittest discover -s tests -p 'test_gc_*.py' -q
+python -m unittest \
+  tests.test_training_validation_inference \
+  tests.test_training_inference_config_migration \
+  tests.test_loader_stack_record_source \
+  tests.test_nnunet_volume_spatial_contract \
+  tests.test_nnunet_precursor_config \
+  tests.test_nnunet_converter_affine \
+  tests.test_nnunet_converter_roundtrip \
+  tests.test_model_loader -q
+```
+
+### Results and durable artifacts
+
+The matrix passed 307 tests: 74 inference, 149 evaluation, 53 GC, and 31
+training-validation/loader/nnU-Net/model-loader tests. Three GC application
+tests were expected host skips because FastAPI is image-only; the same tests
+then passed 3/3 inside the official rebuilt image. A final focused MHA suite
+passed 9/9 after adding explicit axis-flip coverage, and the final sidecar
+status/timeout suite passed 10/10. The stable combined matrix log is:
+
+```text
+cut10b_live_artifacts_20260804a/relevant_regression.log
+6a0eb14f2deff75df6b14a1565d22123fc69825d9161d3c70fc3fa20d8e99d30
+```
+
+The official lifecycle returned HTTP 201 and produced both required files:
+
+```text
+cut10b_live_artifacts_20260804a/output_final_replay/images/stroke-lesion-segmentation/output.mha
+402c0e785a6b660a2fa7864b8513d53d3fd7490935ea9445bf3ef8c21ec24ef9
+
+cut10b_live_artifacts_20260804a/output_final_replay/images/lesion-probability-map/output.mha
+e147d33a831b435c46e7db010e3a61753fd0786350f3c328e2105f46e5853702
+```
+
+Both reopened as compressed MHA with size `[48,56,64]`, spacing
+`[1.5,1.2000000476837158,2.0]`, origin `[-20,10,5]`, and direction
+`[0,1,0,-1,0,0,0,0,1]`, exactly matching the native T1 physical grid. The
+segmentation is binary `uint8`; the probability map is finite `float32` in
+`[0,1]`; and an independent array comparison proved the segmentation equals
+the same native probability thresholded at `0.5`. Runtime provenance reported
+`policy_origin=artifact`, peak allocated CUDA memory `1,990,069,760` bytes,
+and 0.682 seconds for the final synthetic Desktop replay. The earlier full
+value/threshold inspection produced the same two byte hashes.
+
+The opaque NIfTI fixture was rebuilt as
+`medseg-diffusion-gc:cut10b-nifti-fixture`, image ID
+`sha256:c775b5fe041398794784ca657d71f52424bed124dd13e9a4a78973430ed80597`.
+Its external-sidecar lifecycle passed and reproduced the E018/E019 binary
+NIfTI byte-for-byte:
+
+```text
+cut10b_live_artifacts_20260804a/nifti_fixture_output/images/fixture-output/output.nii.gz
+65a7334c1d3eab159b5164e08cf2a8e4b378f7ffea0b22a866279a2574f3033f
+```
+
+The official image was independently saved, passed `gzip -t`, and is
+approximately 3.2 GB:
+
+```text
+cut10b_live_artifacts_20260804a/image_export/medseg-diffusion-gc-cut10b-dev.tar.gz
+12bbd1db2b4daa8d0bc4dd3c83f4a896bab901898315ba94e39508cf8c3124af
+```
+
+### Acceptance scope and invalidation
+
+E020 closes the Desktop development evidence for Cut 10B: the exact official
+socket contract is configuration-owned; shared preprocessing receives only
+canonical `T1`; technical metadata is validated but unconsumed; one native
+probability result supplies the ordered, explicit mask/probability output set;
+RAS/LPS and array-order conversion preserve physical geometry; unsupported
+shear fails; partial/stale declared output sets cannot return success; HTTP is
+tested from outside the algorithm container on an internal network; and the
+legacy NIfTI transport remains live and byte-stable.
+
+This is not Cut 11 qualification. The synthetic Desktop timing and RTX memory
+figures do not establish T4 memory headroom, worst-case-volume runtime, or the
+ten-minute job limit. It is also not the Cut 12 hosted Grand Challenge try-out
+or final upload release. Changes to the official manifest, metadata schema,
+result binding, MHA conversion/validation, complete-output transaction,
+external sidecar lifecycle, image dependency state, shared native restoration,
+or the pinned model/input invalidate the corresponding portion of E020.
 
 ---
 

@@ -12,18 +12,24 @@ from unittest.mock import patch
 
 import nibabel as nib
 import numpy as np
+import SimpleITK as sitk
 
 from scripts.gc_submission_builder.container_builder import (
+    LOCAL_INVOKE_TIMEOUT_SECONDS,
     ContainerBuildError,
+    _run_http_sidecar,
+    _wait_for_health,
     build_container_image,
     save_container_image,
     test_container_image as run_container_test,
     validate_single_input_nifti_output,
+    validate_single_input_output_set,
 )
 from scripts.gc_submission_builder.container_config import (
     ContainerConfigError,
     load_container_build_config,
 )
+from scripts.gc_submission_builder.runtime.interfaces import OutputBinding
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -61,7 +67,7 @@ def _content_audit_payload(*, model_files=(), weight_files=()):
 
 
 class TestGcContainerBuilder(unittest.TestCase):
-    def test_default_config_is_linux_amd64_and_fixture_manifest_is_explicit(self):
+    def test_default_config_is_linux_amd64_and_official_manifest_is_explicit(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = load_container_build_config(
                 DEFAULT_CONFIG,
@@ -69,8 +75,8 @@ class TestGcContainerBuilder(unittest.TestCase):
             )
 
         self.assertEqual(config.platform, "linux/amd64")
-        self.assertEqual(config.image_reference, "medseg-diffusion-gc:cut10")
-        self.assertEqual(config.interface_manifest_path.name, "interface_manifest.fixture.yaml")
+        self.assertEqual(config.image_reference, "medseg-diffusion-gc:isles26")
+        self.assertEqual(config.interface_manifest_path.name, "isles26.yaml")
         self.assertTrue(config.dockerfile.is_file())
 
     def test_config_rejects_model_fields_and_non_amd64_platform(self):
@@ -118,7 +124,10 @@ class TestGcContainerBuilder(unittest.TestCase):
         build = commands[0]
         self.assertEqual(build[:2], ["docker", "build"])
         self.assertIn("linux/amd64", build)
-        self.assertIn("INTERFACE_MANIFEST=scripts/gc_submission_builder/configs/interface_manifest.fixture.yaml", build)
+        self.assertIn(
+            "INTERFACE_MANIFEST=scripts/gc_submission_builder/configs/interfaces/isles26.yaml",
+            build,
+        )
         self.assertFalse(report["model_embedded"])
         self.assertTrue(report["image"]["model_payload_audited"])
         self.assertEqual(report["image"]["architecture"], "amd64")
@@ -193,7 +202,17 @@ class TestGcContainerBuilder(unittest.TestCase):
             output = root / "output"
             config = load_container_build_config(
                 DEFAULT_CONFIG,
-                overrides={"output_dir": root / "artifacts"},
+                overrides={
+                    "output_dir": root / "artifacts",
+                    "interface_manifest": (
+                        PROJECT_ROOT
+                        / "scripts"
+                        / "gc_submission_builder"
+                        / "configs"
+                        / "interfaces"
+                        / "fixture_single_nifti.yaml"
+                    ),
+                },
             )
             commands = []
 
@@ -201,27 +220,30 @@ class TestGcContainerBuilder(unittest.TestCase):
                 commands.append(list(command))
                 if command[:2] == ["docker", "run"]:
                     return _completed(command, stdout="container-id\n")
-                if command[:3] == ["docker", "exec", command[2]] and command[-2:] == ["id", "-u"]:
+                if command[:2] == ["docker", "exec"] and command[-2:] == ["id", "-u"]:
                     return _completed(command, stdout="1000\n")
-                if command[:2] == ["docker", "exec"] and "/invoke" in command[-1]:
-                    prediction = output / "images" / "fixture-output" / "output.nii.gz"
-                    prediction.parent.mkdir(parents=True, exist_ok=True)
-                    output_image = nib.Nifti1Image(
-                        np.zeros((3, 4, 5), dtype=np.uint8),
-                        input_affine,
-                    )
-                    output_image.set_qform(input_affine, code=1)
-                    output_image.set_sform(input_affine, code=2)
-                    nib.save(output_image, prediction)
-                    return _completed(command)
                 return _completed(command)
+
+            def fake_invoke(*args, **kwargs):
+                prediction = output / "images" / "fixture-output" / "output.nii.gz"
+                prediction.parent.mkdir(parents=True, exist_ok=True)
+                output_image = nib.Nifti1Image(
+                    np.zeros((3, 4, 5), dtype=np.uint8),
+                    input_affine,
+                )
+                output_image.set_qform(input_affine, code=1)
+                output_image.set_sform(input_affine, code=2)
+                nib.save(output_image, prediction)
 
             with patch(
                 "scripts.gc_submission_builder.container_builder._run",
                 side_effect=fake_run,
             ), patch(
                 "scripts.gc_submission_builder.container_builder._wait_for_health"
-            ):
+            ) as health, patch(
+                "scripts.gc_submission_builder.container_builder._invoke_from_sidecar",
+                side_effect=fake_invoke,
+            ) as invoke:
                 result = run_container_test(
                     config,
                     model_dir=model,
@@ -229,17 +251,126 @@ class TestGcContainerBuilder(unittest.TestCase):
                     output_dir=output,
                 )
 
+        network_create = next(
+            command for command in commands if command[:3] == ["docker", "network", "create"]
+        )
+        self.assertIn("--internal", network_create)
+        network_name = network_create[-1]
         run = next(command for command in commands if command[:2] == ["docker", "run"])
-        self.assertIn("none", run)
+        self.assertEqual(run[run.index("--network") + 1], network_name)
         self.assertIn("--read-only", run)
         self.assertIn("32g", run)
         self.assertIn("8", run)
         self.assertIn("all", run)
         self.assertTrue(any(value.endswith("dst=/opt/ml/model,readonly") for value in run))
         self.assertTrue(any(value.endswith("dst=/input,readonly") for value in run))
-        self.assertEqual(result.output_dtype, "uint8")
+        health.assert_called_once()
+        invoke.assert_called_once()
+        self.assertEqual(invoke.call_args.kwargs["timeout_seconds"], 300)
+        self.assertEqual(
+            result.output_validations["opaque-fixture-segmentation"]["dtype"],
+            "uint8",
+        )
+        self.assertTrue(result.external_http_tested)
         self.assertNotEqual(result.non_root_uid, 0)
         self.assertTrue(result.geometry_matches_native_input)
+
+    def test_http_probe_uses_external_sidecar_and_exact_status_without_redirects(self):
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append((list(command), dict(kwargs)))
+            return _completed(command, stdout="200\n")
+
+        with patch(
+            "scripts.gc_submission_builder.container_builder._run",
+            side_effect=fake_run,
+        ):
+            result = _run_http_sidecar(
+                container_name="algorithm",
+                image_reference="fixture:image",
+                network_name="offline-network",
+                method="POST",
+                path="/invoke",
+                expected_status=201,
+                timeout_seconds=LOCAL_INVOKE_TIMEOUT_SECONDS,
+            )
+
+        command, kwargs = commands[0]
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(command[:2], ["docker", "run"])
+        self.assertNotIn("exec", command)
+        self.assertEqual(command[command.index("--network") + 1], "offline-network")
+        rendered = " ".join(command)
+        self.assertIn("http.client", rendered)
+        self.assertNotIn("urllib.request", rendered)
+        self.assertEqual(command[-5:], ["algorithm", "POST", "/invoke", "300", "201"])
+        self.assertEqual(kwargs["timeout_seconds"], 305)
+
+    def test_health_sidecar_rejects_redirect_status_immediately(self):
+        redirected = _completed([], stdout="302\n", returncode=22)
+        with patch(
+            "scripts.gc_submission_builder.container_builder._run_http_sidecar",
+            return_value=redirected,
+        ), self.assertRaisesRegex(ContainerBuildError, "exact HTTP 200.*302"):
+            _wait_for_health(
+                "algorithm",
+                image_reference="fixture:image",
+                network_name="offline-network",
+                timeout_seconds=300,
+            )
+
+    def test_external_mha_set_validation_requires_complete_native_grid(self):
+        bindings = (
+            OutputBinding(
+                slug="segmentation",
+                result_key="mask",
+                relative_path="images/segmentation",
+                file_type="mha",
+            ),
+            OutputBinding(
+                slug="probability",
+                result_key="probability",
+                relative_path="images/probability",
+                file_type="mha",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_path = root / "input.nii.gz"
+            affine = np.diag([1.25, 2.5, 3.75, 1.0])
+            affine[:3, 3] = [9.0, -7.0, 3.0]
+            nib.save(
+                nib.Nifti1Image(np.zeros((3, 4, 5), dtype=np.float32), affine),
+                input_path,
+            )
+            reference = sitk.ReadImage(str(input_path))
+            arrays = {
+                "segmentation": np.zeros((5, 4, 3), dtype=np.uint8),
+                "probability": np.full((5, 4, 3), 0.25, dtype=np.float32),
+            }
+            for binding in bindings:
+                directory = root / "output" / binding.relative_path
+                directory.mkdir(parents=True)
+                image = sitk.GetImageFromArray(arrays[binding.slug])
+                image.CopyInformation(reference)
+                sitk.WriteImage(image, str(directory / "output.mha"), True)
+
+            paths, validations = validate_single_input_output_set(
+                bindings=bindings,
+                output_root=root / "output",
+                input_path=input_path,
+            )
+            self.assertEqual(tuple(paths), ("segmentation", "probability"))
+            self.assertTrue(all(item["compressed"] for item in validations.values()))
+
+            (root / "output" / "images" / "probability" / "output.mha").unlink()
+            with self.assertRaisesRegex(ContainerBuildError, "probability"):
+                validate_single_input_output_set(
+                    bindings=bindings,
+                    output_root=root / "output",
+                    input_path=input_path,
+                )
 
     def test_external_nifti_validation_rejects_geometry_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
