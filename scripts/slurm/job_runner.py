@@ -142,6 +142,13 @@ class SlurmJobRunner:
                 "#SBATCH --exclude={exclude}\n", ""
             )
 
+        # Keep the optional GPU directive consistent with the requested count.
+        # CPU-only profiles set gpus=0, which must not emit a GPU GRES request.
+        gpu_count = int(config.get("gpus", 0))
+        config["gpu_directive"] = (
+            f"#SBATCH --gres=gpu:{gpu_count}" if gpu_count > 0 else ""
+        )
+
         # Create the SLURM script
         slurm_script = slurm_template.format(**config)
         script_file = f"temp_{job_name}.sbatch"

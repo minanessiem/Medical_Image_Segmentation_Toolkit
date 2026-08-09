@@ -31,25 +31,43 @@ def get_env_export_string() -> str:
 # ============================================================================
 # Default Resource Configurations
 # ============================================================================
-# Sensible defaults for each nnU-Net command type
+# LRZ resource profiles. CPU-only workloads must not request a GPU GRES.
+
+CPU_RESOURCE_PROFILE = {
+    "partition": "lrz-cpu",
+    "qos": "cpu",
+    "gpus": 0,
+    "gpu_directive": "",
+    "cpus_per_task": 12,
+    "mem": "32G",
+}
+
+GPU_RESOURCE_PROFILE = {
+    "partition": "mcml-dgx-a100-40x8",
+    "qos": "mcml",
+    "gpus": 1,
+    "gpu_directive": "#SBATCH --gres=gpu:1",
+    "cpus_per_task": 24,
+    "mem": "64G",
+}
+
+
+# Sensible defaults for each nnU-Net command type.
 
 COMMAND_DEFAULTS = {
     "preprocess": {
+        **CPU_RESOURCE_PROFILE,
         "time": "02:00:00",
-        "cpus_per_task": 64,
-        "mem": "128G",
         "description": "CPU/memory intensive, no GPU needed for preprocessing",
     },
     "train": {
+        **GPU_RESOURCE_PROFILE,
         "time": "47:00:00",
-        "cpus_per_task": 128,
-        "mem": "256G",
         "description": "Long-running GPU training",
     },
     "predict": {
+        **GPU_RESOURCE_PROFILE,
         "time": "04:00:00",
-        "cpus_per_task": 32,
-        "mem": "64G",
         "description": "GPU inference, faster than training",
     },
 }
@@ -71,7 +89,7 @@ NNUNET_SLURM_TEMPLATE = """#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --partition={partition}
 #SBATCH --qos={qos}
-#SBATCH --gres=gpu:{gpus}
+{gpu_directive}
 #SBATCH --time={time}
 #SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --mem={mem}
@@ -96,4 +114,3 @@ srun \\
   --container-image=$IMAGE \\
   bash -c "cd {container_code_dir}/medseg-diffusion_ISLES24 && export PYTHONNOUSERSITE=1 && export TORCH_MULTIPROCESSING_SHARING_STRATEGY=file_system && {nnunet_env_exports} && {command}"
 """
-

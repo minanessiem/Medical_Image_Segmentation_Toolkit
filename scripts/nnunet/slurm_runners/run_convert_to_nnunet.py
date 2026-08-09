@@ -7,7 +7,7 @@ as a non-interactive SLURM job.
 
 Usage:
     python3 -m scripts.nnunet.slurm_runners.run_convert_to_nnunet \
-        [--time 02:00:00] [--cpus 64] [--mem 64G] \
+        [--time 02:00:00] [--cpus 12] [--mem 32G] \
         --convert-config-name nnunet/convert/isles24_cluster_baseline \
         [hydra_overrides...] \
         [--dry-run]
@@ -27,7 +27,7 @@ Examples:
     # Custom resources then overrides
     python3 -m scripts.nnunet.slurm_runners.run_convert_to_nnunet \
         --convert-config-name nnunet/convert/isles26_cluster_3d_t1raw \
-        --time 04:00:00 --cpus 32 --mem 64G \
+        --time 04:00:00 --cpus 12 --mem 32G \
         nnunet.test=false
 
     # Dry run to see what would be submitted
@@ -50,14 +50,14 @@ if PROJECT_ROOT not in sys.path:
 from scripts.slurm.base_run_config import BASE_CONFIG, SLURM_TEMPLATE, update_logdir_paths
 from scripts.slurm.job_runner import SlurmJobRunner
 from scripts.slurm.single_job_runner import load_config
+from scripts.nnunet.slurm_runners.nnunet_env import CPU_RESOURCE_PROFILE
 
 
 # Default resource configuration for dataset conversion
 # CPU/IO bound task - no heavy GPU usage needed
 CONVERT_DEFAULTS = {
+    **CPU_RESOURCE_PROFILE,
     "time": "02:00:00",
-    "cpus_per_task": 64,
-    "mem": "64G",
 }
 
 
@@ -107,13 +107,13 @@ def parse_arguments() -> argparse.Namespace:
         "--partition",
         type=str,
         default=None,
-        help=f"SLURM partition (default: {BASE_CONFIG['partition']})",
+        help=f"SLURM partition (default: {CONVERT_DEFAULTS['partition']})",
     )
     slurm_group.add_argument(
         "--qos",
         type=str,
         default=None,
-        help=f"SLURM QoS (default: {BASE_CONFIG['qos']})",
+        help=f"SLURM QoS (default: {CONVERT_DEFAULTS['qos']})",
     )
     slurm_group.add_argument(
         "--time",
@@ -199,6 +199,7 @@ def main():
 
     # Create job configuration
     config = BASE_CONFIG.copy()
+    config.update(CONVERT_DEFAULTS)
 
     # Override with conversion-specific settings
     config["python_command"] = python_command
@@ -234,6 +235,7 @@ def main():
     print("-" * 60)
     print("  Resources:")
     print(f"    Partition: {config['partition']}")
+    print(f"    QoS:       {config['qos']}")
     print(f"    GPUs:      {config['gpus']}")
     print(f"    CPUs:      {args.cpus}")
     print(f"    Memory:    {args.mem}")

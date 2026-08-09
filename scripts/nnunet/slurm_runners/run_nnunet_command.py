@@ -277,13 +277,13 @@ def add_slurm_args(parser: argparse.ArgumentParser, defaults: Dict[str, Any]) ->
         '--partition',
         type=str,
         default=None,
-        help=f'SLURM partition (default: {BASE_CONFIG["partition"]})'
+        help=f'SLURM partition (default: {defaults["partition"]})'
     )
     group.add_argument(
         '--qos',
         type=str,
         default=None,
-        help=f'SLURM QoS (default: {BASE_CONFIG["qos"]})'
+        help=f'SLURM QoS (default: {defaults["qos"]})'
     )
     group.add_argument(
         '--time',
@@ -326,6 +326,8 @@ def build_slurm_config(
 ) -> Dict[str, Any]:
     """Build SLURM job configuration."""
     config = BASE_CONFIG.copy()
+    defaults = COMMAND_DEFAULTS[command_name]
+    config.update({key: value for key, value in defaults.items() if key != 'description'})
     
     # Set command with nnU-Net env exports
     config['command'] = command
@@ -386,6 +388,7 @@ def print_job_summary(
     print("-" * 70)
     print("  SLURM Resources:")
     print(f"    Partition: {config['partition']}")
+    print(f"    QoS:       {config['qos']}")
     print(f"    GPUs:      {config['gpus']}")
     print(f"    CPUs:      {args.cpus}")
     print(f"    Memory:    {args.mem}")
@@ -483,4 +486,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

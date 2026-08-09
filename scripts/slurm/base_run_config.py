@@ -15,6 +15,7 @@ BASE_CONFIG = {
     "partition": "mcml-dgx-a100-40x8",
     "qos": "mcml",
     "gpus": 1,
+    "gpu_directive": "#SBATCH --gres=gpu:1",
     "time": "47:00:00",
     "cpus_per_task": 128,
     "mem": "256G",
@@ -52,7 +53,7 @@ SLURM_TEMPLATE = """#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --partition={partition}
 #SBATCH --qos={qos}
-#SBATCH --gres=gpu:{gpus}
+{gpu_directive}
 #SBATCH --time={time}
 #SBATCH --dependency={dependency}
 #SBATCH --nodelist={include}

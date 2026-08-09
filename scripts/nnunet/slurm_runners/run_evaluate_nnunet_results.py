@@ -7,7 +7,7 @@ as a non-interactive SLURM job.
 
 Usage:
     python3 -m scripts.nnunet.slurm_runners.run_evaluate_nnunet_results \
-        [--time 02:00:00] [--cpus 64] [--mem 64G] \
+        [--time 02:00:00] [--cpus 12] [--mem 32G] \
         --convert-config-name nnunet/convert/isles26_cluster_3d_t1raw \
         --eval-config-name nnunet/eval/volumes_3d \
         [hydra_overrides...] \
@@ -38,14 +38,14 @@ if PROJECT_ROOT not in sys.path:
 from scripts.slurm.base_run_config import BASE_CONFIG, SLURM_TEMPLATE, update_logdir_paths
 from scripts.slurm.job_runner import SlurmJobRunner
 from scripts.slurm.single_job_runner import load_config
+from scripts.nnunet.slurm_runners.nnunet_env import CPU_RESOURCE_PROFILE
 
 
 # Default resource configuration for evaluation
 # CPU/IO bound task, can be heavier for native 3D metrics.
 EVAL_DEFAULTS = {
+    **CPU_RESOURCE_PROFILE,
     "time": "02:00:00",
-    "cpus_per_task": 64,
-    "mem": "64G",
 }
 
 
@@ -92,13 +92,13 @@ def parse_arguments() -> argparse.Namespace:
         "--partition",
         type=str,
         default=None,
-        help=f"SLURM partition (default: {BASE_CONFIG['partition']})",
+        help=f"SLURM partition (default: {EVAL_DEFAULTS['partition']})",
     )
     slurm_group.add_argument(
         "--qos",
         type=str,
         default=None,
-        help=f"SLURM QoS (default: {BASE_CONFIG['qos']})",
+        help=f"SLURM QoS (default: {EVAL_DEFAULTS['qos']})",
     )
     slurm_group.add_argument(
         "--time",
@@ -182,6 +182,7 @@ def main() -> None:
         dataset_id, dataset_name = "unknown", "unknown"
 
     config = BASE_CONFIG.copy()
+    config.update(EVAL_DEFAULTS)
     config["python_command"] = python_command
     config["cpus_per_task"] = args.cpus
     config["mem"] = args.mem
@@ -212,6 +213,7 @@ def main() -> None:
     print("-" * 60)
     print("  Resources:")
     print(f"    Partition: {config['partition']}")
+    print(f"    QoS:       {config['qos']}")
     print(f"    GPUs:      {config['gpus']}")
     print(f"    CPUs:      {args.cpus}")
     print(f"    Memory:    {args.mem}")
