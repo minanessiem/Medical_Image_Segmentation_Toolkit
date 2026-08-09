@@ -1,0 +1,25 @@
+# Human fold 1 selects datalist fold value 0.
+defaults:
+  - isles26_base
+  - _self_
+
+fold: 0
+partitioning: fold
+subsets:
+  train:
+    fold_not_in: ["${dataset.fold}"]
+  val_fast:
+    fold_in: ["${dataset.fold}"]
+  val_rest:
+    fold_in: ["${dataset.fold}"]
+  val_full:
+    fold_in: ["${dataset.fold}"]
+active_subsets:
+  train: train
+  val: val_full
+  sample: val_full
+modalities: ['T1_RAW']
+num_modalities: 1
+nnunet:
+  dataset_id: "266"
+  dataset_name: "isles26_atlas30_soopincluded_3fold_fold1_t1_raw"

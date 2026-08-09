@@ -52,20 +52,29 @@ class Isles26Case:
 
 
 def resolve_training_root(dataset_path: Path) -> Path:
-    """Resolve the directory containing the site folders, e.g. R001/R034."""
+    """Resolve the directory containing center folders with subject children."""
     for candidate in TRAINING_ROOT_CANDIDATES:
         training_root = dataset_path / candidate
         if _contains_site_directories(training_root):
             return training_root
 
     raise FileNotFoundError(
-        "Could not find ISLES26 training root. Expected site folders such as "
-        f"'R001' under one of: {', '.join(str(dataset_path / c) for c in TRAINING_ROOT_CANDIDATES)}"
+        "Could not find ISLES26 training root. Expected center folders containing "
+        f"'sub-*' directories under one of: "
+        f"{', '.join(str(dataset_path / c) for c in TRAINING_ROOT_CANDIDATES)}"
     )
 
 
+def _is_subject_dir(path: Path) -> bool:
+    return path.is_dir() and path.name.startswith("sub-")
+
+
+def _is_site_dir(path: Path) -> bool:
+    return path.is_dir() and any(_is_subject_dir(child) for child in path.iterdir())
+
+
 def _contains_site_directories(path: Path) -> bool:
-    return path.is_dir() and any(child.is_dir() and child.name.startswith("R") for child in path.iterdir())
+    return path.is_dir() and any(_is_site_dir(child) for child in path.iterdir())
 
 
 def discover_cases(training_root: Path) -> List[Isles26Case]:
@@ -91,15 +100,15 @@ def discover_cases(training_root: Path) -> List[Isles26Case]:
 
 
 def _iter_site_dirs(training_root: Path) -> Iterable[Path]:
-    return (child for child in training_root.iterdir() if child.is_dir() and child.name.startswith("R"))
+    return (child for child in training_root.iterdir() if _is_site_dir(child))
 
 
 def _iter_subject_dirs(site_dir: Path) -> Iterable[Path]:
-    return (child for child in site_dir.iterdir() if child.is_dir() and child.name.startswith("sub-"))
+    return (child for child in site_dir.iterdir() if _is_subject_dir(child))
 
 
-def _site_sort_key(path: Path) -> int:
-    return _extract_first_int(path.name)
+def _site_sort_key(path: Path) -> tuple[int, str]:
+    return _extract_first_int(path.name), path.name.casefold()
 
 
 def _subject_sort_key(path: Path) -> tuple[int, int]:
@@ -145,6 +154,9 @@ def load_metadata_row(metadata_path: Path) -> Dict[str, Any]:
     """Load the first row of an ISLES26 metadata CSV."""
     metadata_df = pd.read_csv(metadata_path)
 
+    if metadata_df.empty:
+        return {column: None for column in metadata_df.columns}
+
     if DAYS_POST_STROKE_COLUMN in metadata_df.columns:
         metadata_df[DAYS_POST_STROKE_COLUMN] = pd.to_numeric(
             metadata_df[DAYS_POST_STROKE_COLUMN],
@@ -160,6 +172,13 @@ def load_metadata_row(metadata_path: Path) -> Dict[str, Any]:
     return metadata_df.iloc[0].to_dict()
 
 
+def _metadata_site(metadata: Dict[str, Any], fallback: str) -> str:
+    value = metadata.get("SITE")
+    if value is None or pd.isna(value) or not str(value).strip():
+        return fallback
+    return str(value)
+
+
 def assign_round_robin_folds(cases: List[Isles26Case], num_folds: int) -> Dict[str, int]:
     """Assign folds by sorted case order until ISLES26 stratification is implemented."""
     return {case.case_id: index % num_folds for index, case in enumerate(cases)}
@@ -172,6 +191,7 @@ def build_metadata_dataframe(cases: List[Isles26Case], training_root: Path) -> p
         metadata = load_metadata_row(case.metadata_path)
         metadata["caseID"] = case.case_id
         metadata["siteID"] = case.site_id
+        metadata["SITE"] = _metadata_site(metadata, case.site_id)
         metadata["metadata_csv"] = case.metadata_path.relative_to(training_root).as_posix()
         rows.append(metadata)
 
@@ -511,6 +531,7 @@ def build_case_entry(
 ) -> Dict[str, Any]:
     """Build one MSD-style JSON entry using paths relative to the training root."""
     metadata = load_metadata_row(case.metadata_path)
+    site = _metadata_site(metadata, case.site_id)
 
     case_entry = {
         "caseID": case.case_id,
@@ -519,11 +540,11 @@ def build_case_entry(
         "label": _relative_posix(case.label_path, training_root),
         "metadata_csv": _relative_posix(case.metadata_path, training_root),
         "metadata": {
-            "ATLAS2_DATASET": metadata.get("ATLAS2_DATASET"),
-            "SESSION_ID": metadata.get("SESSION_ID"),
+            "ATLAS2_DATASET": _json_safe_value(metadata.get("ATLAS2_DATASET")),
+            "SESSION_ID": _json_safe_value(metadata.get("SESSION_ID")),
             "DAYS_POST_STROKE": _json_safe_value(metadata.get("DAYS_POST_STROKE")),
             "CHRONICITY": _json_safe_value(metadata.get("CHRONICITY")),
-            "SITE": metadata.get("SITE", case.site_id),
+            "SITE": site,
         },
     }
 

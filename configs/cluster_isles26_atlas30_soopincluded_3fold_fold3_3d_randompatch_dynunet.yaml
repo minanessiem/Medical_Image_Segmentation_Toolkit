@@ -1,0 +1,57 @@
+# ATLAS3.0 + SOOP fold 3 (JSON fold 2), cluster DynUNet training.
+defaults:
+  - cluster
+  - override /distribution: dp
+  - override /environment: isles26_atlas30_soopincluded_3fold_cluster
+  - override /model: dynunet_base
+  - override /data_profile: isles26_3d_randompatch_t1raw
+  - override /dataset: isles26_atlas30_soopincluded_3fold_fold3_t1raw
+  - override /diffusion: discriminative
+  - override /loss: discriminative_dicebce_deepsupervision
+  - override /logging: 3d_discriminative
+  - override /validation: sliding_window_3d_metrics_subset
+  - override /training: train_100Kms_ampbfloat16
+  - override /augmentation: aggressive_3d
+  - _self_
+
+distribution:
+  timeout_minutes: 300
+
+model:
+  image_size: 128
+  deep_supervision: true
+  deep_supr_num: 2
+
+data_runtime:
+  loader_smoke_testing: false
+  train_batch_size: 3
+  num_train_workers: 8
+  num_valid_workers: 3
+
+validation:
+  val_batch_size: 1
+  validation_interval: 5000
+  inference:
+    sliding_window:
+      sw_batch_size: 4
+
+logging:
+  image_log_interval: 1000
+  min_log_step: 100
+
+environment:
+  training:
+    output_root: '/mnt/outputs/discriminative_dynunet_isles26_atlas30_soopincluded_3fold_fold3_3d_randompatch/'
+
+dataset:
+  preprocessing_configs:
+    random_patches_3d:
+      patches_per_volume:
+        train: 32
+
+training:
+  checkpoint_interval:
+    save_interval: 1000
+  checkpoint_best:
+    enabled: true
+    metric_name: dice_3d
