@@ -7,6 +7,46 @@ from src.data.loader_stack.isles26_loader import datafold_read
 
 
 class TestIsles26DatalistParser(unittest.TestCase):
+    def test_datafold_read_fold_subset_without_split_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            datalist_path = base / "dataset.json"
+            payload = {
+                "training": [
+                    {
+                        "caseID": f"sub-soop{index:04d}",
+                        "fold": fold,
+                        "siteID": "SOOP",
+                        "T1": f"SOOP/sub-soop{index:04d}/t1.nii.gz",
+                        "label": f"SOOP/sub-soop{index:04d}/label.nii.gz",
+                    }
+                    for index, fold in enumerate((0, 1, 2), start=1)
+                ]
+            }
+            datalist_path.write_text(json.dumps(payload), encoding="utf-8")
+            subset_definitions = {
+                "train": {"fold_not_in": (0,)},
+                "val": {"fold_in": (0,)},
+            }
+
+            train_records = datafold_read(
+                datalist=str(datalist_path),
+                basedir=str(base),
+                subset_name="train",
+                partitioning="fold",
+                subset_definitions=subset_definitions,
+            )
+            val_records = datafold_read(
+                datalist=str(datalist_path),
+                basedir=str(base),
+                subset_name="val",
+                partitioning="fold",
+                subset_definitions=subset_definitions,
+            )
+
+            self.assertEqual([record["fold"] for record in train_records], [1, 2])
+            self.assertEqual([record["fold"] for record in val_records], [0])
+
     def test_datafold_read_split_subset_and_union(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

@@ -1,0 +1,47 @@
+# ATLAS3.0 + SOOP fold 1 (JSON fold 0), local DynUNet smoke training.
+defaults:
+  - local
+  - override /environment: isles26_atlas30_soopincluded_3fold_local
+  - override /model: dynunet_base
+  - override /data_profile: isles26_3d_randompatch_t1raw
+  - override /dataset: isles26_atlas30_soopincluded_3fold_fold1_t1raw
+  - override /diffusion: discriminative
+  - override /loss: discriminative_dicebce_deepsupervision
+  - override /logging: 3d_discriminative
+  - override /validation: sliding_window_3d_metrics_subset
+  - override /training: train_100Kms_ampbfloat16
+  - override /augmentation: aggressive_3d
+  - _self_
+
+model:
+  image_size: 64
+  deep_supervision: true
+  deep_supr_num: 2
+
+dataset:
+  preprocessing_configs:
+    random_patches_3d:
+      patches_per_volume:
+        train: 1
+
+data_runtime:
+  loader_smoke_testing: true
+  train_batch_size: 1
+  test_batch_size: 1
+  num_train_workers: 0
+  num_valid_workers: 0
+  num_test_workers: 0
+
+validation:
+  validation_interval: 5
+  val_batch_size: 1
+
+training:
+  checkpoint_best:
+    enabled: true
+    metric_name: dice_3d
+
+logging:
+  interval: 5
+  image_log_interval: 5
+  min_log_step: 5

@@ -28,7 +28,10 @@ from monai.transforms import (
 )
 
 from src.data.augmentation import AugmentationPipeline2D, AugmentationPipeline3D
-from src.data.loader_stack.subset_contract import filter_records_for_subset
+from src.data.loader_stack.subset_contract import (
+    filter_records_for_subset,
+    normalize_partitioning_mode,
+)
 from src.utils.loader_monai_utils import build_monai_compose_safe
 from src.utils.loader_transforms import (
     MergeProcessedChannelsTransform,
@@ -39,7 +42,7 @@ from src.utils.loader_utils import LoaderDataUtils
 ISLES26_MODALITY_KEY = "T1"
 ISLES26_SUPPORTED_MODALITY_KEYS = (ISLES26_MODALITY_KEY,)
 ISLES26_SUPPORTED_PREPROCESSING_KEYS = ("RAW", "ZSCORE", "PCTNORM", "PCT_ZSCORE")
-ISLES26_REQUIRED_RECORD_KEYS = ("caseID", ISLES26_MODALITY_KEY, "label", "split")
+ISLES26_REQUIRED_RECORD_KEYS = ("caseID", ISLES26_MODALITY_KEY, "label")
 ISLES26_OPTIONAL_RECORD_KEYS = ("siteID", "metadata_csv", "metadata", "fold")
 ISLES26_VIRTUAL_PATH_TEMPLATE = "{case_id}_slice{slice_idx}"
 ISLES26_PATCH_PATH_TEMPLATE = "{case_id}_patch{patch_idx}"
@@ -629,15 +632,23 @@ def _normalize_t1_paths(t1_value: object, basedir: str) -> list[str]:
     return resolved_paths
 
 
-def _normalize_case_record(record: Mapping[str, Any], basedir: str) -> Dict[str, Any]:
+def _normalize_case_record(
+    record: Mapping[str, Any],
+    basedir: str,
+    partitioning: str = "split",
+) -> Dict[str, Any]:
     """
     Validate and normalize one ISLES26 datalist record.
     """
-    missing = [key for key in ISLES26_REQUIRED_RECORD_KEYS if key not in record]
+    normalized_partitioning = normalize_partitioning_mode(partitioning)
+    partition_key = "fold" if normalized_partitioning == "fold" else "split"
+    required_keys = (*ISLES26_REQUIRED_RECORD_KEYS, partition_key)
+    missing = [key for key in required_keys if key not in record]
     if missing:
         raise ValueError(
             "ISLES26 record is missing required keys: "
-            f"{missing}. Required keys: {ISLES26_REQUIRED_RECORD_KEYS}."
+            f"{missing}. Required keys for partitioning='{normalized_partitioning}': "
+            f"{required_keys}."
         )
 
     normalized = _normalize_case_record_paths(record=record, basedir=basedir)
@@ -646,17 +657,20 @@ def _normalize_case_record(record: Mapping[str, Any], basedir: str) -> Dict[str,
         field_name="caseID",
     )
 
-    split_value = record.get("split")
-    if not LoaderDataUtils.is_non_empty(split_value):
-        raise ValueError("ISLES26 record requires non-empty 'split' label.")
-    normalized["split"] = str(split_value).strip()
+    if "split" in record:
+        split_value = record.get("split")
+        if not LoaderDataUtils.is_non_empty(split_value):
+            raise ValueError("ISLES26 record requires non-empty 'split' label when provided.")
+        normalized["split"] = str(split_value).strip()
 
-    if "fold" in record and LoaderDataUtils.is_non_empty(record.get("fold")):
+    if "fold" in record:
+        if not LoaderDataUtils.is_non_empty(record.get("fold")):
+            raise ValueError("ISLES26 record requires non-empty 'fold' value when provided.")
         try:
             normalized["fold"] = int(record.get("fold"))
         except Exception as exc:
             raise ValueError(
-                f"ISLES26 record has invalid optional 'fold' value: {record.get('fold')}."
+                f"ISLES26 record has invalid 'fold' value: {record.get('fold')}."
             ) from exc
 
     normalized[ISLES26_MODALITY_KEY] = _normalize_t1_paths(
@@ -688,7 +702,12 @@ def _normalize_case_record(record: Mapping[str, Any], basedir: str) -> Dict[str,
     return normalized
 
 
-def _read_normalized_records(datalist, basedir, key="training"):
+def _read_normalized_records(
+    datalist,
+    basedir,
+    key="training",
+    partitioning: str = "split",
+):
     datalist_path = os.path.expanduser(str(datalist))
     basedir_path = os.path.expanduser(str(basedir))
 
@@ -714,7 +733,11 @@ def _read_normalized_records(datalist, basedir, key="training"):
                 f"got: {type(record).__name__}."
             )
         normalized_records.append(
-            _normalize_case_record(record=record, basedir=basedir_path)
+            _normalize_case_record(
+                record=record,
+                basedir=basedir_path,
+                partitioning=partitioning,
+            )
         )
     return normalized_records
 
@@ -730,10 +753,12 @@ def datafold_read(
     """
     Read and normalize ISLES26 datalist entries with subset-based selection.
     """
+    normalized_partitioning = normalize_partitioning_mode(partitioning)
     normalized_records = _read_normalized_records(
         datalist=datalist,
         basedir=basedir,
         key=key,
+        partitioning=normalized_partitioning,
     )
     requested_subset = str(subset_name).strip()
     if len(requested_subset) == 0:
@@ -741,7 +766,7 @@ def datafold_read(
 
     normalized_subset_definitions = subset_definitions
     if normalized_subset_definitions is None:
-        if str(partitioning).strip().lower() != "split":
+        if normalized_partitioning != "split":
             raise ValueError(
                 "ISLES26 datafold_read requires partitioning='split' when "
                 "subset_definitions are omitted."
@@ -752,7 +777,7 @@ def datafold_read(
 
     return filter_records_for_subset(
         records=normalized_records,
-        partitioning=str(partitioning).strip().lower(),
+        partitioning=normalized_partitioning,
         subset_name=requested_subset,
         subset_definitions=normalized_subset_definitions,
     )

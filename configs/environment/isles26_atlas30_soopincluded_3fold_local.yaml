@@ -1,0 +1,6 @@
+defaults:
+  - isles26_local
+  - _self_
+
+dataset:
+  split_file: '/mnt/c/Users/minanessiem/Development/isles26_combined/atlas21_training_raw/isles26_soopincluded_3fold_2026_08_09.json'
