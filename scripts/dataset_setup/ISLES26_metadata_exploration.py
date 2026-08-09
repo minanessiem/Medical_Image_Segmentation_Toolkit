@@ -6,9 +6,9 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-try:
-    from scripts.ISLES26_json_creator import discover_cases, resolve_training_root, validate_case
-except ModuleNotFoundError:
+if __package__:
+    from .ISLES26_json_creator import discover_cases, resolve_training_root, validate_case
+else:
     from ISLES26_json_creator import discover_cases, resolve_training_root, validate_case
 
 
