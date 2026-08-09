@@ -1,6 +1,0 @@
-defaults:
-  - isles26_cluster
-  - _self_
-
-dataset:
-  split_file: '/mnt/datasets/isles26_combined/atlas21_training_raw/isles26_nested_15_5_best_2026-07-28.json'

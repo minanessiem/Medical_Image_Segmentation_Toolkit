@@ -1,6 +1,0 @@
-defaults:
-  - isles26_modalities_t1raw
-
-nnunet:
-  dataset_id: "265"
-  dataset_name: "isles26_atlas30_t1_raw"

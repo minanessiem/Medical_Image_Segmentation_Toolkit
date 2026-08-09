@@ -1,7 +1,0 @@
-# @package _global_
-
-defaults:
-  - /dataset: isles26_atlas30_modalities_t1raw
-  - /data_mode: full_volumes_3d
-  - /data_io: isles26_online_volumes
-  - _self_
