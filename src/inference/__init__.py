@@ -1,5 +1,6 @@
 """Shared, transport-independent inference contracts for native and container consumers."""
 
+from src.inference.augmentation import TtaView, build_tta_views, tta_view_names
 from src.inference.contracts import (
     InferenceError,
     InferenceInputError,
@@ -33,6 +34,7 @@ from src.inference.pipeline import (
 from src.inference.policy import (
     InferencePolicy,
     ResolvedInferencePolicy,
+    TtaPolicy,
     parse_inference_policy,
     resolve_inference_policy,
 )
@@ -72,9 +74,12 @@ __all__ = [
     "SpatialRestorationError",
     "SpatialTrace",
     "TimingResourceRecord",
+    "TtaPolicy",
+    "TtaView",
     "UnsupportedModelError",
     "ValidatedInferenceRequest",
     "build_model_probability_executor",
+    "build_tta_views",
     "build_case_producer",
     "predict_preprocessed_case",
     "parse_inference_policy",
@@ -84,6 +89,7 @@ __all__ = [
     "preprocess_case",
     "restore_probability_to_native",
     "threshold_probability",
+    "tta_view_names",
     "validate_output_geometry",
     "write_native_prediction_mask",
 ]

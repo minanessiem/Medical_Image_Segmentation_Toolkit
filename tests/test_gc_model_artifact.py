@@ -146,6 +146,7 @@ class TestGcModelArtifact(unittest.TestCase):
             assert policy is not None
             policy_payload = yaml.safe_load(policy.read_text(encoding="utf-8"))
             policy_payload["ensemble"] = {"enabled": True, "method": "mean"}
+            policy_payload["tta"] = {"enabled": True, "flip_axes": ["x", "y"]}
             policy.write_text(
                 yaml.safe_dump(policy_payload, sort_keys=False),
                 encoding="utf-8",
@@ -177,6 +178,13 @@ class TestGcModelArtifact(unittest.TestCase):
             self.assertEqual(
                 tuple(member.member_id for member in discovered),
                 ("fold1", "fold2", "fold3"),
+            )
+            archived_policy = yaml.safe_load(
+                (result.artifact_dir / "inference_policy.yaml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                archived_policy["tta"],
+                {"enabled": True, "flip_axes": ["x", "y"]},
             )
             self.assertEqual(
                 sorted(
@@ -302,6 +310,12 @@ class TestGcModelArtifact(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir, _checkpoint, policy = _write_source_tree(root)
+            policy_payload = yaml.safe_load(policy.read_text(encoding="utf-8"))
+            policy_payload["tta"] = {"enabled": True, "flip_axes": ["x", "y"]}
+            policy.write_text(
+                yaml.safe_dump(policy_payload, sort_keys=False),
+                encoding="utf-8",
+            )
             with patch(
                 "scripts.gc_submission_builder.model_artifact.validate_model_artifact"
             ) as validate:
@@ -334,6 +348,10 @@ class TestGcModelArtifact(unittest.TestCase):
             self.assertEqual(validation.output_space, "native_input")
             self.assertEqual(validation.runtime_profile, "gc_submission")
             self.assertEqual(validation.sliding_window_batch_size, 1)
+            self.assertTrue(validation.tta_enabled)
+            self.assertEqual(validation.tta_flip_axes, ("x", "y"))
+            self.assertEqual(validation.tta_view_count_per_model, 3)
+            self.assertEqual(validation.effective_prediction_count, 3)
             composed = strict_load.call_args.args[0]
             self.assertEqual(
                 OmegaConf.select(composed, "validation.inference.sliding_window.sw_batch_size"),

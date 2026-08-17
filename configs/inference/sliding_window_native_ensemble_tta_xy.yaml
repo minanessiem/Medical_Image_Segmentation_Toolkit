@@ -1,0 +1,11 @@
+defaults:
+  - sliding_window_native_ensemble
+  - _self_
+
+# Identity is implicit. Each configured axis adds one independent flip view;
+# [x, y] therefore means identity, x-only, and y-only (not an xy combination).
+tta:
+  enabled: true
+  flip_axes:
+    - x
+    - y

@@ -75,6 +75,10 @@ class ModelArtifactValidationResult:
     ensemble_method: str = "mean"
     member_count: int = 1
     member_ids: tuple[str, ...] = ("model",)
+    tta_enabled: bool = False
+    tta_flip_axes: tuple[str, ...] = ()
+    tta_view_count_per_model: int = 1
+    effective_prediction_count: int = 1
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -306,6 +310,12 @@ def validate_model_artifact(
         ensemble_method=canonical_policy.ensemble.method,
         member_count=len(members),
         member_ids=tuple(member.member_id for member in members),
+        tta_enabled=canonical_policy.tta.enabled,
+        tta_flip_axes=canonical_policy.tta.flip_axes,
+        tta_view_count_per_model=1 + len(canonical_policy.tta.flip_axes),
+        effective_prediction_count=(
+            len(members) * (1 + len(canonical_policy.tta.flip_axes))
+        ),
     )
 
 

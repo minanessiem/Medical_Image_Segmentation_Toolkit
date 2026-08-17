@@ -143,6 +143,21 @@ class TestGcBuilderConfig(unittest.TestCase):
         self.assertFalse(policy["ensemble"]["enabled"])
         self.assertFalse(policy["postprocessing"]["enabled"])
 
+    def test_xy_tta_ensemble_policy_materializes_three_views_per_model(self):
+        policy = compose_inference_policy_file(
+            PROJECT_ROOT
+            / "configs"
+            / "inference"
+            / "sliding_window_native_ensemble_tta_xy.yaml"
+        )
+
+        self.assertNotIn("defaults", policy)
+        self.assertTrue(policy["ensemble"]["enabled"])
+        self.assertEqual(policy["ensemble"]["method"], "mean")
+        self.assertTrue(policy["tta"]["enabled"])
+        self.assertEqual(policy["tta"]["flip_axes"], ["x", "y"])
+        self.assertNotIn("view_count", policy["tta"])
+
     def test_policy_inheritance_cycle_fails_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -76,10 +76,13 @@ python3 -m scripts.gc_submission_builder.cli build-model \
 Select the inference policy explicitly for every release. In particular, do not
 substitute `sliding_window_native_fp16.yaml` until the recorded FP16
 sliding-window accumulation issue has been resolved and certified.
-TTA and postprocessing remain disabled. Equal-weight model ensembling is
-supported through `sliding_window_native_ensemble.yaml`. The ensemble member
-count is never configured: it is derived from the explicit `members` entries at
-build time and from the verified member directories at runtime.
+Postprocessing remains disabled. Equal-weight model ensembling is supported
+through `sliding_window_native_ensemble.yaml`. Configurable, exactly invertible
+single-axis flip TTA is supported by the shared inference policy; the selected
+ISLES26 release policy is `sliding_window_native_ensemble_tta_xy.yaml`. The
+ensemble member count and TTA view count are never configured separately: model
+count is discovered from artifact members, while view count is identity plus the
+configured flip axes.
 
 For the three-fold ISLES26 ensemble, create a release-local builder config:
 
@@ -99,6 +102,20 @@ output_dir: /absolute/path/to/new-release-directory/model
 archive_name: algorithmmodel.tar.gz
 validation_device: cpu
 ```
+
+For the selected ISLES26 X/Y TTA candidate, point the same builder config at:
+
+```yaml
+inference_policy: /absolute/path/to/configs/inference/sliding_window_native_ensemble_tta_xy.yaml
+```
+
+This policy performs identity, X-only, and Y-only inference independently for
+every discovered model. It inverse-flips each probability on the model grid,
+averages probabilities, restores the combined probability to native space once,
+and thresholds once. A Z-only view is also supported by the schema when `z` is
+explicitly configured for a 3D model; axis combinations are never added
+implicitly. Named X/Y/Z axes follow the canonical RAS model-grid voxel order
+`[B,C,X,Y,Z]`; they are not inferred from PyTorch's generic D/H/W labels.
 
 Then build it with:
 
@@ -142,9 +159,10 @@ An ensemble artifact instead has this verified layout:
   model_build_report.json
 ```
 
-The runtime preprocesses a case once, executes each discovered member
-sequentially, accumulates an FP32 probability mean without stacking member
-volumes, restores to native space once, and thresholds once.
+The runtime preprocesses a case once, executes each discovered member and its
+configured TTA views sequentially, inverse-transforms every augmented
+probability, and accumulates FP32 probability means without stacking full
+volumes. It restores to native space once and thresholds once.
 
 The `.tar.gz` archive already has the correct root-relative layout for Grand
 Challenge expansion beneath `/opt/ml/model/`. Do not wrap it in another parent

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import nibabel as nib
 import numpy as np
@@ -17,13 +18,16 @@ from src.inference.case_producer import build_case_producer
 from src.inference.contracts import (
     InvalidPredictionError,
     NativeImageMetadata,
+    PredictorCapabilities,
     PreprocessedCase,
     SpatialGeometry,
     SpatialRestorationError,
     SpatialTrace,
 )
 from src.inference.output import write_native_prediction_mask
-from src.inference.pipeline import predict_preprocessed_case
+from src.inference.pipeline import ModelProbabilityExecutor, predict_preprocessed_case
+from src.inference.policy import InferencePolicy, SlidingWindowPolicy, TtaPolicy
+from src.inference.spatial import restore_probability_to_native, threshold_probability
 
 
 def _affine_tuple(affine):
@@ -112,6 +116,8 @@ class DummyExecutor:
         self.policy = SimpleNamespace(
             output_space=output_space,
             decision=SimpleNamespace(threshold=threshold),
+            tta=TtaPolicy(),
+            ensemble=SimpleNamespace(method="mean"),
         )
         self.policy_source = "explicit_top_level"
 
@@ -120,7 +126,73 @@ class DummyExecutor:
         return self.probability.clone()
 
 
+class IdentityProbabilityPredictor:
+    capabilities = PredictorCapabilities(
+        model_family="discriminative",
+        spatial_dims=3,
+        input_channels=1,
+        output_channels=1,
+        supported_precisions=("fp32",),
+    )
+
+    def predict(self, conditioned_image):
+        return conditioned_image.detach().clone()
+
+
 class TestInferenceNativeOutput(unittest.TestCase):
+    def test_xy_tta_returns_to_original_model_orientation_before_one_native_restore(self):
+        model_affine = np.diag([2.0, 1.0, 1.0, 1.0])
+        case = _case((3, 2, 2), model_affine, (5, 2, 2), np.eye(4))
+        ramp = torch.linspace(0.0, 1.0, 12).reshape(1, 1, 3, 2, 2)
+        case = replace(
+            case,
+            image=MetaTensor(ramp, affine=torch.as_tensor(model_affine)),
+        )
+        policy = InferencePolicy(
+            sliding_window=SlidingWindowPolicy(
+                roi_size=(3, 2, 2),
+                enabled=False,
+            ),
+            output_space="native_input",
+            precision="fp32",
+            tta=TtaPolicy(enabled=True, flip_axes=("x", "y")),
+        )
+        executor = ModelProbabilityExecutor(
+            predictor=IdentityProbabilityPredictor(),
+            policy=policy,
+            policy_source="explicit_top_level",
+        )
+        expected_native_probability = restore_probability_to_native(
+            ramp,
+            case.spatial_trace,
+        )
+
+        with patch(
+            "src.inference.pipeline.restore_probability_to_native",
+            wraps=restore_probability_to_native,
+        ) as restore, patch(
+            "src.inference.pipeline.threshold_probability",
+            wraps=threshold_probability,
+        ) as threshold:
+            result = predict_preprocessed_case(
+                executor,
+                case,
+                show_window_progress=False,
+            )
+
+        restore.assert_called_once()
+        threshold.assert_called_once()
+        torch.testing.assert_close(
+            result.probability,
+            expected_native_probability,
+            rtol=0,
+            atol=1e-6,
+        )
+        self.assertEqual(tuple(result.probability.shape[2:]), (5, 2, 2))
+        self.assertEqual(result.provenance["tta"]["view_names"], ["identity", "flip_x", "flip_y"])
+        self.assertEqual(result.provenance["effective_prediction_count"], 3)
+        self.assertTrue(result.provenance["spatial_restoration"]["applied"])
+
     def test_model_space_result_remains_on_model_grid(self):
         case = _case((3, 3, 3), np.eye(4), (5, 5, 5), np.diag([0.5, 0.5, 0.5, 1.0]))
         probability = torch.linspace(0.0, 1.0, 27).reshape(1, 1, 3, 3, 3)

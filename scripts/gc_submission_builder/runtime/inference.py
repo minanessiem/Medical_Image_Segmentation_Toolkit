@@ -683,6 +683,14 @@ def initialize_runtime(
             "member_count": len(loaded_members),
             "member_ids": [member_id for member_id, _model, _cfg in loaded_members],
         },
+        tta={
+            "enabled": resolved_policy.policy.tta.enabled,
+            "flip_axes": list(resolved_policy.policy.tta.flip_axes),
+            "view_count_per_model": 1 + len(resolved_policy.policy.tta.flip_axes),
+            "effective_prediction_count": (
+                len(loaded_members) * (1 + len(resolved_policy.policy.tta.flip_axes))
+            ),
+        },
         models={
             member_id: _model_summary(member_model)
             for member_id, member_model, _cfg in loaded_members

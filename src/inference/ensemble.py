@@ -17,7 +17,7 @@ SUPPORTED_ENSEMBLE_METHODS = frozenset({"mean"})
 
 @dataclass
 class MeanProbabilityAccumulator:
-    """Accumulate equally weighted probabilities without stacking full volumes."""
+    """Accumulate model/TTA probabilities without stacking full volumes."""
 
     _sum: Tensor | None = None
     _count: int = 0
@@ -29,17 +29,17 @@ class MeanProbabilityAccumulator:
     def add(self, probability: Tensor) -> None:
         if not torch.is_tensor(probability) or not probability.is_floating_point():
             raise InvalidPredictionError(
-                "Ensemble members must produce floating-point probability tensors."
+                "Probability contributors must produce floating-point tensors."
             )
         if probability.numel() == 0:
-            raise InvalidPredictionError("Ensemble probability tensors must not be empty.")
+            raise InvalidPredictionError("Probability contributors must not be empty.")
         if not bool(torch.isfinite(probability).all()):
-            raise InvalidPredictionError("Ensemble probabilities contain non-finite values.")
+            raise InvalidPredictionError("Probability contributors contain non-finite values.")
         minimum = float(probability.detach().amin().cpu())
         maximum = float(probability.detach().amax().cpu())
         if minimum < 0.0 or maximum > 1.0:
             raise InvalidPredictionError(
-                "Ensemble members must produce probabilities within [0, 1]; "
+                "Probability contributors must be within [0, 1]; "
                 f"observed range [{minimum}, {maximum}]."
             )
 
@@ -49,11 +49,11 @@ class MeanProbabilityAccumulator:
         else:
             if value.device != self._sum.device:
                 raise InvalidPredictionError(
-                    "All ensemble probability tensors must be on the same device."
+                    "All probability contributors must be on the same device."
                 )
             if tuple(value.shape) != tuple(self._sum.shape):
                 raise InvalidPredictionError(
-                    "All ensemble probability tensors must have identical shapes; "
+                    "All probability contributors must have identical shapes; "
                     f"expected {tuple(self._sum.shape)}, got {tuple(value.shape)}."
                 )
             self._sum.add_(value)
@@ -62,7 +62,7 @@ class MeanProbabilityAccumulator:
     def mean(self) -> Tensor:
         if self._sum is None or self._count == 0:
             raise InvalidPredictionError(
-                "Cannot produce an ensemble mean without at least one member."
+                "Cannot produce a probability mean without at least one contributor."
             )
         return self._sum.div(float(self._count))
 

@@ -27,6 +27,7 @@ class TestInferencePolicyParsing(unittest.TestCase):
         self.assertEqual(policy.sliding_window.sw_batch_size, 1)
         self.assertEqual(policy.decision.threshold, 0.5)
         self.assertFalse(policy.tta.enabled)
+        self.assertEqual(policy.tta.flip_axes, ())
         self.assertFalse(policy.ensemble.enabled)
         self.assertFalse(policy.postprocessing.enabled)
         self.assertFalse(policy.artifacts.enabled)
@@ -85,7 +86,7 @@ class TestInferencePolicyParsing(unittest.TestCase):
         self.assertFalse(explicit_direct.sliding_window.enabled)
 
     def test_unimplemented_features_are_disabled_stubs(self):
-        feature_names = ("tta", "postprocessing", "artifacts")
+        feature_names = ("postprocessing", "artifacts")
         for feature_name in feature_names:
             with self.subTest(feature=feature_name):
                 policy = self._parse(
@@ -116,6 +117,39 @@ class TestInferencePolicyParsing(unittest.TestCase):
             with self.subTest(raw_policy=raw_policy):
                 with self.assertRaisesRegex(InvalidInferencePolicyError, "unknown keys"):
                     self._parse(raw_policy)
+
+    def test_tta_supports_named_independent_flip_axes(self):
+        policy = self._parse(
+            {"tta": {"enabled": True, "flip_axes": ["x", "y", "z"]}}
+        )
+
+        self.assertTrue(policy.tta.enabled)
+        self.assertEqual(policy.tta.flip_axes, ("x", "y", "z"))
+
+        two_dimensional = self._parse(
+            {"tta": {"enabled": True, "flip_axes": ["x", "y"]}},
+            model_roi=(32, 32),
+        )
+        self.assertEqual(two_dimensional.tta.flip_axes, ("x", "y"))
+
+    def test_tta_rejects_ambiguous_or_unavailable_axes(self):
+        invalid_policies = (
+            ({"tta": {"enabled": True}}, "at least one"),
+            ({"tta": {"enabled": False, "flip_axes": ["x"]}}, "must be empty"),
+            ({"tta": {"enabled": True, "flip_axes": "xy"}}, "must be a sequence"),
+            ({"tta": {"enabled": True, "flip_axes": ["x", "x"]}}, "duplicate"),
+            ({"tta": {"enabled": True, "flip_axes": ["time"]}}, "unavailable"),
+        )
+        for raw_policy, message in invalid_policies:
+            with self.subTest(raw_policy=raw_policy):
+                with self.assertRaisesRegex(InvalidInferencePolicyError, message):
+                    self._parse(raw_policy)
+
+        with self.assertRaisesRegex(InvalidInferencePolicyError, "unavailable for 2D"):
+            self._parse(
+                {"tta": {"enabled": True, "flip_axes": ["z"]}},
+                model_roi=(32, 32),
+            )
 
     def test_ensemble_supports_mean_without_a_configured_member_count(self):
         policy = self._parse(
@@ -346,6 +380,7 @@ class TestInferencePolicyParsing(unittest.TestCase):
             "sliding_window_native.yaml": {"defaults", "output_space"},
             "sliding_window_native_fp16.yaml": {"defaults", "precision"},
             "sliding_window_native_ensemble.yaml": {"defaults", "ensemble"},
+            "sliding_window_native_ensemble_tta_xy.yaml": {"defaults", "tta"},
         }
 
         for filename, keys in expected_keys.items():
@@ -361,6 +396,7 @@ class TestInferencePolicyParsing(unittest.TestCase):
                 "sliding_window_native.yaml",
                 "sliding_window_native_fp16.yaml",
                 "sliding_window_native_ensemble.yaml",
+                "sliding_window_native_ensemble_tta_xy.yaml",
             },
         )
 

@@ -10,6 +10,7 @@ import torch
 from monai.data import MetaTensor
 from omegaconf import DictConfig
 
+from src.inference.augmentation import build_tta_views, tta_view_names
 from src.inference.contracts import (
     PredictionResult,
     PreprocessedCase,
@@ -54,6 +55,39 @@ class ModelProbabilityExecutor:
         show_window_progress: bool = True,
     ) -> torch.Tensor:
         """Return model/preprocessed-grid probabilities for the supplied tensor."""
+        if not self.policy.tta.enabled:
+            return self._predict_once(
+                conditioned_image,
+                progress_label=progress_label,
+                show_window_progress=show_window_progress,
+            )
+
+        accumulator = MeanProbabilityAccumulator()
+        capabilities = validate_predictor_capabilities(self.predictor.capabilities)
+        for view in build_tta_views(
+            self.policy.tta,
+            spatial_dims=capabilities.spatial_dims,
+        ):
+            view_label = (
+                f"{progress_label}:{view.name}" if progress_label else view.name
+            )
+            transformed_probability = self._predict_once(
+                view.apply(conditioned_image),
+                progress_label=view_label,
+                show_window_progress=show_window_progress,
+            )
+            accumulator.add(view.invert(transformed_probability))
+        return accumulator.mean()
+
+    def _predict_once(
+        self,
+        conditioned_image: torch.Tensor,
+        *,
+        progress_label: Optional[str],
+        show_window_progress: bool,
+    ) -> torch.Tensor:
+        """Execute one unaugmented view through direct or sliding-window inference."""
+
         with torch.inference_mode(), _autocast_context(
             conditioned_image,
             self.policy.precision,
@@ -225,6 +259,8 @@ def predict_preprocessed_case(
 
     mask = threshold_probability(probability, executor.policy.decision.threshold)
     member_ids = tuple(getattr(executor, "member_ids", ()))
+    model_count = len(member_ids) if member_ids else 1
+    view_names = tta_view_names(executor.policy.tta)
     return PredictionResult(
         probability=probability,
         mask=mask,
@@ -240,6 +276,13 @@ def predict_preprocessed_case(
             "inference_policy_source": str(executor.policy_source),
             "output_space": output_space,
             "threshold": float(executor.policy.decision.threshold),
+            "tta": {
+                "enabled": executor.policy.tta.enabled,
+                "flip_axes": list(executor.policy.tta.flip_axes),
+                "view_names": list(view_names),
+                "view_count_per_model": len(view_names),
+            },
+            "effective_prediction_count": model_count * len(view_names),
             "ensemble": {
                 "enabled": bool(member_ids),
                 "method": executor.policy.ensemble.method if member_ids else None,

@@ -130,7 +130,7 @@ artifacts: {{enabled: false}}
     return model
 
 
-def _write_ensemble_model_files(root: Path) -> Path:
+def _write_ensemble_model_files(root: Path, *, tta_axes=()) -> Path:
     model = root / "ensemble_model"
     members_root = model / "members"
     members_root.mkdir(parents=True)
@@ -171,8 +171,13 @@ def _write_ensemble_model_files(root: Path) -> Path:
                 "source_checkpoint": f"checkpoint-{member_id}.pth",
             }
         )
+    tta_policy = (
+        "tta: {enabled: false}"
+        if not tta_axes
+        else "tta: {enabled: true, flip_axes: [" + ", ".join(tta_axes) + "]}"
+    )
     (model / "inference_policy.yaml").write_text(
-        """output_space: native_input
+        f"""output_space: native_input
 precision: fp32
 sliding_window:
   enabled: true
@@ -180,11 +185,11 @@ sliding_window:
   overlap: 0.5
   blend_mode: gaussian
   padding_mode: constant
-tta: {enabled: false}
-ensemble: {enabled: true, method: mean}
-decision: {threshold: 0.5}
-postprocessing: {enabled: false}
-artifacts: {enabled: false}
+{tta_policy}
+ensemble: {{enabled: true, method: mean}}
+decision: {{threshold: 0.5}}
+postprocessing: {{enabled: false}}
+artifacts: {{enabled: false}}
 """,
         encoding="utf-8",
     )
@@ -203,7 +208,7 @@ class TestGcRuntime(unittest.TestCase):
     def test_initialization_discovers_and_loads_all_three_artifact_members(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            model_dir = _write_ensemble_model_files(root)
+            model_dir = _write_ensemble_model_files(root, tta_axes=("x", "y"))
             interface_path = _write_manifest(root)
             runtime_path = _write_runtime_profile(root)
             capabilities = PredictorCapabilities(
@@ -258,6 +263,8 @@ class TestGcRuntime(unittest.TestCase):
                 initialized.executor.member_ids,
                 ("fold1", "fold2", "fold3"),
             )
+            self.assertTrue(initialized.executor.policy.tta.enabled)
+            self.assertEqual(initialized.executor.policy.tta.flip_axes, ("x", "y"))
 
     def test_fixture_manifests_bind_registered_isles24_and_isles26_adapters(self):
         cases = (

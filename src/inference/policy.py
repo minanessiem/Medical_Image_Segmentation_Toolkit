@@ -15,6 +15,7 @@ from src.inference.ensemble import SUPPORTED_ENSEMBLE_METHODS
 SUPPORTED_PRECISIONS = frozenset({"fp16", "fp32", "bf16"})
 SUPPORTED_BLEND_MODES = frozenset({"constant", "gaussian"})
 SUPPORTED_PADDING_MODES = frozenset({"constant", "reflect", "replicate", "circular"})
+SUPPORTED_TTA_FLIP_AXES = frozenset({"x", "y", "z"})
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class SlidingWindowPolicy:
 @dataclass(frozen=True)
 class TtaPolicy:
     enabled: bool = False
+    flip_axes: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,7 +114,7 @@ def parse_inference_policy(
             data.get("sliding_window"),
             model_roi=expected_roi,
         ),
-        tta=_parse_tta(data.get("tta")),
+        tta=_parse_tta(data.get("tta"), spatial_dims=len(expected_roi)),
         ensemble=_parse_ensemble(data.get("ensemble")),
         decision=_parse_decision(data.get("decision")),
         postprocessing=_parse_postprocessing(data.get("postprocessing")),
@@ -245,11 +247,40 @@ def _parse_sliding_window(
     )
 
 
-def _parse_tta(raw: Any) -> TtaPolicy:
+def _parse_tta(raw: Any, *, spatial_dims: int) -> TtaPolicy:
     data = _plain_mapping(raw, "inference.tta")
-    _reject_unknown(data, {"enabled"}, "inference.tta")
-    enabled = _disabled_feature(data, "inference.tta")
-    return TtaPolicy(enabled=enabled)
+    _reject_unknown(data, {"enabled", "flip_axes"}, "inference.tta")
+    enabled = _boolean(data.get("enabled", False), "inference.tta.enabled")
+    raw_axes = data.get("flip_axes", ())
+    if not isinstance(raw_axes, (list, tuple, ListConfig)):
+        raise InvalidInferencePolicyError(
+            "inference.tta.flip_axes must be a sequence of named spatial axes."
+        )
+    flip_axes = tuple(str(axis).strip().lower() for axis in raw_axes)
+    if any(not axis for axis in flip_axes):
+        raise InvalidInferencePolicyError(
+            "inference.tta.flip_axes must not contain empty axis names."
+        )
+    if len(set(flip_axes)) != len(flip_axes):
+        raise InvalidInferencePolicyError(
+            "inference.tta.flip_axes must not contain duplicate axes."
+        )
+    supported_axes = {"x", "y"} if spatial_dims == 2 else set(SUPPORTED_TTA_FLIP_AXES)
+    unsupported = sorted(set(flip_axes) - supported_axes)
+    if unsupported:
+        raise InvalidInferencePolicyError(
+            f"inference.tta.flip_axes contains axes unavailable for {spatial_dims}D "
+            f"inference: {unsupported}."
+        )
+    if enabled and not flip_axes:
+        raise InvalidInferencePolicyError(
+            "inference.tta.enabled=true requires at least one configured flip axis."
+        )
+    if not enabled and flip_axes:
+        raise InvalidInferencePolicyError(
+            "inference.tta.flip_axes must be empty when inference.tta.enabled=false."
+        )
+    return TtaPolicy(enabled=enabled, flip_axes=flip_axes)
 
 
 def _parse_ensemble(raw: Any) -> EnsemblePolicy:
@@ -409,6 +440,7 @@ __all__ = [
     "PostprocessingPolicy",
     "ResolvedInferencePolicy",
     "SlidingWindowPolicy",
+    "SUPPORTED_TTA_FLIP_AXES",
     "TtaPolicy",
     "parse_inference_policy",
     "resolve_inference_policy",

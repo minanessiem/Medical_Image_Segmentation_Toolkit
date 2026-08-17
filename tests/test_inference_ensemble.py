@@ -17,7 +17,12 @@ from src.inference.pipeline import (
     EnsembleProbabilityExecutor,
     ModelProbabilityExecutor,
 )
-from src.inference.policy import EnsemblePolicy, InferencePolicy, SlidingWindowPolicy
+from src.inference.policy import (
+    EnsemblePolicy,
+    InferencePolicy,
+    SlidingWindowPolicy,
+    TtaPolicy,
+)
 
 
 class _ConstantPredictor:
@@ -31,18 +36,21 @@ class _ConstantPredictor:
 
     def __init__(self, value: float) -> None:
         self.value = value
+        self.call_count = 0
 
     def predict(self, conditioned_image: torch.Tensor) -> torch.Tensor:
+        self.call_count += 1
         return torch.full_like(conditioned_image, self.value)
 
 
-def _ensemble_policy() -> InferencePolicy:
+def _ensemble_policy(*, tta_axes=()) -> InferencePolicy:
     return InferencePolicy(
         sliding_window=SlidingWindowPolicy(
             roi_size=(2, 2, 2),
             enabled=False,
         ),
         precision="fp32",
+        tta=TtaPolicy(enabled=bool(tta_axes), flip_axes=tuple(tta_axes)),
         ensemble=EnsemblePolicy(enabled=True, method="mean"),
     )
 
@@ -95,6 +103,32 @@ class TestProbabilityEnsemble(unittest.TestCase):
         result = executor(torch.zeros((1, 1, 2, 2, 2)))
 
         self.assertEqual(executor.member_ids, ("fold1", "fold2", "fold3"))
+        self.assertTrue(torch.equal(result, torch.full_like(result, 0.5)))
+
+    def test_three_members_with_xy_tta_execute_nine_probability_predictions(self):
+        policy = _ensemble_policy(tta_axes=("x", "y"))
+        predictors = tuple(_ConstantPredictor(value) for value in (0.2, 0.5, 0.8))
+        members = tuple(
+            EnsembleMemberExecutor(
+                member_id=f"fold{index}",
+                executor=ModelProbabilityExecutor(
+                    predictor=predictor,
+                    policy=policy,
+                    policy_source="explicit_top_level",
+                ),
+            )
+            for index, predictor in enumerate(predictors, start=1)
+        )
+        executor = EnsembleProbabilityExecutor(
+            members=members,
+            policy=policy,
+            policy_source="explicit_top_level",
+        )
+
+        result = executor(torch.zeros((1, 1, 2, 2, 2)))
+
+        self.assertEqual(tuple(predictor.call_count for predictor in predictors), (3, 3, 3))
+        self.assertEqual(sum(predictor.call_count for predictor in predictors), 9)
         self.assertTrue(torch.equal(result, torch.full_like(result, 0.5)))
 
     def test_executor_rejects_duplicate_ids_and_disabled_ensemble(self):
