@@ -12,6 +12,273 @@ builder and transport are dataset-agnostic across registered repository datasets
 the saved model config selects the dataset adapter, while a user-supplied interface
 manifest maps arbitrary platform socket slugs to that adapter's canonical raw keys.
 
+## Operator release recipe
+
+This is the recommended end-to-end procedure for producing and testing one
+Grand Challenge image/model release pair. Run every command from the repository
+root in Linux or WSL. Use a machine with Docker, the NVIDIA Container Toolkit,
+an available NVIDIA GPU, and the repository's Python environment activated.
+Budget disk space for the local Docker image, Docker's temporary uncompressed
+`docker save` tar, and the approximately 3.7 GB compressed release archive; the
+archive size alone is not a sufficient free-space estimate.
+
+The procedure deliberately builds, tests, and saves in separate steps. This
+ensures that the exact image/model pair is exercised through the external HTTP
+lifecycle before the large image archive is created for upload.
+
+### 1. Pin the release inputs
+
+Start from a reviewed commit and a clean working tree:
+
+```bash
+git status --short
+git rev-parse HEAD
+```
+
+Define release-specific paths and names. `GC_RUN_DIR` must be a complete training
+run containing `.hydra/config.yaml` and the selected checkpoint. Use a new release
+directory: the builders refuse to overwrite model archives, artifact directories,
+or image archives, and the lifecycle tester rejects non-empty output directories.
+
+```bash
+export GC_RUN_DIR=/absolute/path/to/training-run
+export GC_CHECKPOINT=best_model_step_040000_dice_3d_0.5724
+export GC_RELEASE_ROOT=/absolute/path/to/new-release-directory
+export GC_MODEL_OUTPUT="$GC_RELEASE_ROOT/model"
+export GC_IMAGE_OUTPUT="$GC_RELEASE_ROOT/image"
+export GC_TEST_INPUT=/absolute/path/to/platform-shaped-test-input
+export GC_TEST_OUTPUT="$GC_RELEASE_ROOT/lifecycle-output"
+export GC_IMAGE_NAME=medseg-diffusion-gc
+export GC_IMAGE_TAG=isles26-YYYYMMDD-candidate01
+
+mkdir -p "$GC_RELEASE_ROOT"
+```
+
+The checkpoint may be specified by its unique basename, with or without `.pth`,
+when it occurs exactly once in the supported run checkpoint directories. If the
+name is ambiguous, pass an exact path relative to `GC_RUN_DIR`. Release checkpoint
+selection never searches outside the chosen run.
+
+### 2. Build and strictly validate the model archive
+
+The current certified baseline uses native-space FP32 inference:
+
+```bash
+python3 -m scripts.gc_submission_builder.cli build-model \
+  --run-dir "$GC_RUN_DIR" \
+  --checkpoint "$GC_CHECKPOINT" \
+  --inference-policy configs/inference/sliding_window_native.yaml \
+  --output-dir "$GC_MODEL_OUTPUT" \
+  --validation-device cpu
+```
+
+Select the inference policy explicitly for every release. In particular, do not
+substitute `sliding_window_native_fp16.yaml` until the recorded FP16
+sliding-window accumulation issue has been resolved and certified.
+The current release runtime also requires TTA, ensembling, and postprocessing to
+remain disabled; do not hand-edit unsupported parameters into the packaged
+policy before their shared Cut 8 implementations and validation evidence land.
+
+The command reconstructs the model from the saved resolved training config,
+strictly loads the selected weights, resolves the registered dataset adapter,
+validates the production policy, and produces:
+
+```text
+<model-output>/
+  algorithmmodel/
+    artifact_manifest.json
+    config.yaml
+    inference_policy.yaml
+    weights.pth
+  <complete-training-run-directory-name>.tar.gz
+  model_build_report.json
+```
+
+The `.tar.gz` archive already has the correct root-relative layout for Grand
+Challenge expansion beneath `/opt/ml/model/`. Do not wrap it in another parent
+directory or manually rebuild it from `algorithmmodel/` before upload.
+
+### 3. Build the model-independent ISLES26 image
+
+```bash
+python3 -m scripts.gc_submission_builder.cli build-image \
+  --image-name "$GC_IMAGE_NAME" \
+  --image-tag "$GC_IMAGE_TAG" \
+  --interface-manifest scripts/gc_submission_builder/configs/interfaces/isles26.yaml \
+  --output-dir "$GC_IMAGE_OUTPUT"
+```
+
+The image is built for `linux/amd64`, contains no model weights, and is inspected
+for the required non-root user, Grand Challenge API label, platform, and absence
+of embedded checkpoint payloads. `container_build_report.json` records the image
+ID, Dockerfile and dependency hashes, interface-manifest hash, and exact copied
+source fingerprint.
+
+### 4. Prepare a platform-shaped lifecycle input
+
+For ISLES26, `GC_TEST_INPUT` must have this layout:
+
+```text
+<test-input>/
+  inputs.json
+  stroke-metadata.json
+  images/
+    t1-brain-mri/
+      <one-file>.mha
+```
+
+The image may instead be one supported `.tif`, `.tiff`, `.nii`, or `.nii.gz`
+file. There must be exactly one manifest-accepted image in the socket directory.
+The platform-generated filename is intentionally irrelevant.
+
+`inputs.json` contains the platform socket declarations:
+
+```json
+[
+  {
+    "socket": {
+      "slug": "t1-brain-mri",
+      "relative_path": "images/t1-brain-mri"
+    }
+  },
+  {
+    "socket": {
+      "slug": "stroke-metadata",
+      "relative_path": "stroke-metadata.json"
+    }
+  }
+]
+```
+
+For an unconditioned lifecycle fixture, valid nullable metadata is sufficient:
+
+```json
+{
+  "CENTER": null,
+  "CHRONICITY": null,
+  "DAYS_POST_STROKE": null
+}
+```
+
+Do not commit patient data or platform-generated patient filenames as fixtures.
+
+### 5. Test the exact image/model pair
+
+`GC_TEST_OUTPUT` must be absent or empty. The lifecycle command mounts the
+generated `algorithmmodel/` directory exactly as Grand Challenge mounts the
+separately expanded model archive:
+
+```bash
+python3 -m scripts.gc_submission_builder.cli test \
+  --image-name "$GC_IMAGE_NAME" \
+  --image-tag "$GC_IMAGE_TAG" \
+  --interface-manifest scripts/gc_submission_builder/configs/interfaces/isles26.yaml \
+  --output-dir "$GC_IMAGE_OUTPUT" \
+  --model-dir "$GC_MODEL_OUTPUT/algorithmmodel" \
+  --input-dir "$GC_TEST_INPUT" \
+  --test-output-dir "$GC_TEST_OUTPUT" \
+  --readiness-timeout-seconds 300
+```
+
+A passing lifecycle requires all of the following:
+
+- external-sidecar `GET /health` returns HTTP 200;
+- external-sidecar `POST /invoke` returns HTTP 201 within 300 seconds;
+- the container runs non-root, offline, with read-only input/model mounts;
+- `stroke-lesion-segmentation/output.mha` is binary `uint8`;
+- `lesion-probability-map/output.mha` is finite `float32` in `[0, 1]`;
+- both outputs reopen successfully and match the native T1 physical grid;
+- the runtime log contains successful `startup_completed`,
+  `input_canonicalized`, and `invocation_completed` `GC_EVENT` records.
+
+Do not proceed to image export after a failed or incomplete lifecycle. Diagnose
+the stable `stage`, `error_code`, and sanitized `detail` fields in the final
+`GC_EVENT` record first.
+
+### 6. Save the tested image
+
+Pass the same image identity, manifest, and output directory used for the
+lifecycle test:
+
+```bash
+python3 -m scripts.gc_submission_builder.cli save \
+  --image-name "$GC_IMAGE_NAME" \
+  --image-tag "$GC_IMAGE_TAG" \
+  --interface-manifest scripts/gc_submission_builder/configs/interfaces/isles26.yaml \
+  --output-dir "$GC_IMAGE_OUTPUT"
+```
+
+The output is a deterministic-gzip Docker archive named from the image and tag,
+for example:
+
+```text
+medseg-diffusion-gc-isles26-YYYYMMDD-candidate01.tar.gz
+```
+
+Saving re-inspects the image and refuses to overwrite an existing archive.
+
+### 7. Verify and record the release pair
+
+Before upload, inspect both reports and verify both compressed archives:
+
+```bash
+python3 -m json.tool "$GC_MODEL_OUTPUT/model_build_report.json"
+python3 -m json.tool "$GC_IMAGE_OUTPUT/container_build_report.json"
+gzip -t "$GC_MODEL_OUTPUT"/*.tar.gz
+gzip -t "$GC_IMAGE_OUTPUT"/*.tar.gz
+sha256sum "$GC_MODEL_OUTPUT"/*.tar.gz "$GC_IMAGE_OUTPUT"/*.tar.gz
+tar -tzf "$GC_MODEL_OUTPUT"/*.tar.gz
+```
+
+The model archive listing must contain only the four model artifact files at its
+root. Record at least:
+
+- repository commit and whether the source tree was clean;
+- complete training-run directory name and exact checkpoint path;
+- inference policy path and policy hash;
+- model archive filename, size, and SHA-256;
+- image reference, image ID, copied-source SHA-256, archive filename, size, and
+  SHA-256;
+- selected interface-manifest hash;
+- lifecycle input identity, outcome, invoke time, and peak memory;
+- hosted Grand Challenge result ID after upload.
+
+The image and model remain independently replaceable, so filenames alone are
+not enough to identify a tested pair. Preserve the two build reports with the
+release record.
+
+### 8. Upload to Grand Challenge
+
+Upload the two artifacts according to their distinct roles:
+
+| Local artifact | Grand Challenge destination |
+|---|---|
+| Docker image `.tar.gz` from `GC_IMAGE_OUTPUT` | Algorithm container image |
+| Training-run-named `.tar.gz` from `GC_MODEL_OUTPUT` | Algorithm model expanded beneath `/opt/ml/model/` |
+
+Attach the model to the algorithm version that uses the matching image. A
+successful hosted result should show the expected image source fingerprint,
+artifact config/policy hashes, T4 identity, `output_space: native_input`, both
+official output bindings, and a final successful `invocation_completed` event.
+
+The Grand Challenge execution history includes provisioning, image download,
+and result upload outside the container. Compare the platform's **Invoke
+Duration**, rather than its total duration, with the internal
+`invoke_total_seconds` telemetry.
+
+### 9. Rebuilding or replacing one side
+
+- To change only weights, checkpoint, or inference policy, build a new model
+  archive and retest it against the unchanged local image before upload.
+- To change runtime code, dependencies, Dockerfile, or interface handling,
+  assign a new image tag, rebuild the image, and repeat the exact-pair lifecycle.
+- Never infer compatibility merely because a previous image and a previous model
+  each passed independently.
+- Keep the last hosted-successful image/model pair available as the rollback
+  baseline while testing a candidate replacement.
+
+## Reference
+
 ## Interface manifests
 
 `configs/interfaces/isles26.yaml` records the official ISLES26 contract from the
@@ -140,7 +407,9 @@ python3 -m scripts.gc_submission_builder.cli build-all \
 
 `save` writes a gzip-compressed Docker archive and refuses to overwrite an existing
 one. `build-all` builds the model artifact, builds the independent image, and saves
-the image archive. `container/save.sh` exposes the same standalone save operation.
+the image archive, but it does not run the exact-pair lifecycle test. Prefer the
+staged operator recipe for release candidates. `container/save.sh` exposes the
+same standalone save operation.
 
 ## Diagnostic result spaces
 
@@ -167,9 +436,9 @@ only beneath the separately mounted `/diagnostic` tree.
 ## Certification boundary
 
 Desktop container smoke tests establish code, dependency, transport, and spatial
-behavior. They do not certify AWS T4 peak memory or the ten-minute case deadline;
-those measurements belong to the following resource-certification cut. The
-official manifest and two-output lifecycle satisfy Cut 10B's interface boundary;
-hosted image-input normalization and observability are completed by Cut 10B-2;
-upload readiness still depends on its rebuilt-image lifecycle evidence, Cut 11
-resource certification, and the final platform dry run in Cut 12.
+behavior. The current Cut 10B-2 baseline has also completed successful hosted T4
+invocations with both official outputs, including a large oblique anisotropic
+input. Hosted evidence is exact-image/exact-model evidence: it does not certify
+untested checkpoints, a worst-case phase volume, or optional TTA, ensemble, and
+postprocessing policies. Cut 11 retains formal worst-case resource qualification,
+while Cut 12 records the final chosen image/model pair and platform result IDs.
