@@ -7,8 +7,9 @@ This package produces two independently replaceable release artifacts:
   inference code, preprocessing adapters, CUDA/PyTorch runtime, and Grand
   Challenge HTTP service, but no model weights.
 
-The initial certified runtime is for one 3D discriminative repository model. The
-builder and transport are dataset-agnostic across registered repository datasets:
+The runtime supports either one 3D discriminative repository model or an
+arbitrary number of compatible members combined by equal-weight probability
+mean. The builder and transport are dataset-agnostic across registered repository datasets:
 the saved model config selects the dataset adapter, while a user-supplied interface
 manifest maps arbitrary platform socket slugs to that adapter's canonical raw keys.
 
@@ -75,9 +76,41 @@ python3 -m scripts.gc_submission_builder.cli build-model \
 Select the inference policy explicitly for every release. In particular, do not
 substitute `sliding_window_native_fp16.yaml` until the recorded FP16
 sliding-window accumulation issue has been resolved and certified.
-The current release runtime also requires TTA, ensembling, and postprocessing to
-remain disabled; do not hand-edit unsupported parameters into the packaged
-policy before their shared Cut 8 implementations and validation evidence land.
+TTA and postprocessing remain disabled. Equal-weight model ensembling is
+supported through `sliding_window_native_ensemble.yaml`. The ensemble member
+count is never configured: it is derived from the explicit `members` entries at
+build time and from the verified member directories at runtime.
+
+For the three-fold ISLES26 ensemble, create a release-local builder config:
+
+```yaml
+members:
+  - id: fold1
+    run_dir: /absolute/path/to/fold1-run
+    checkpoint: models/best/exact-fold1-checkpoint.pth
+  - id: fold2
+    run_dir: /absolute/path/to/fold2-run
+    checkpoint: models/best/exact-fold2-checkpoint.pth
+  - id: fold3
+    run_dir: /absolute/path/to/fold3-run
+    checkpoint: models/best/exact-fold3-checkpoint.pth
+inference_policy: /absolute/path/to/configs/inference/sliding_window_native_ensemble.yaml
+output_dir: /absolute/path/to/new-release-directory/model
+archive_name: algorithmmodel.tar.gz
+validation_device: cpu
+```
+
+Then build it with:
+
+```bash
+python3 -m scripts.gc_submission_builder.cli build-model \
+  --config /absolute/path/to/ensemble-builder.yaml
+```
+
+Do not add `num_models`, `member_count`, weights, or fold count to the inference
+policy. Member IDs and per-member hashes are generated into the artifact
+manifest. All saved model, dataset, modality, and preprocessing contracts must
+match; training fold and run provenance may differ.
 
 The command reconstructs the model from the saved resolved training config,
 strictly loads the selected weights, resolves the registered dataset adapter,
@@ -90,9 +123,28 @@ validates the production policy, and produces:
     config.yaml
     inference_policy.yaml
     weights.pth
-  <complete-training-run-directory-name>.tar.gz
+  algorithmmodel.tar.gz
   model_build_report.json
 ```
+
+An ensemble artifact instead has this verified layout:
+
+```text
+<model-output>/
+  algorithmmodel/
+    artifact_manifest.json
+    inference_policy.yaml
+    members/
+      fold1/{config.yaml,weights.pth}
+      fold2/{config.yaml,weights.pth}
+      fold3/{config.yaml,weights.pth}
+  algorithmmodel.tar.gz
+  model_build_report.json
+```
+
+The runtime preprocesses a case once, executes each discovered member
+sequentially, accumulates an FP32 probability mean without stacking member
+volumes, restores to native space once, and thresholds once.
 
 The `.tar.gz` archive already has the correct root-relative layout for Grand
 Challenge expansion beneath `/opt/ml/model/`. Do not wrap it in another parent
@@ -230,8 +282,10 @@ sha256sum "$GC_MODEL_OUTPUT"/*.tar.gz "$GC_IMAGE_OUTPUT"/*.tar.gz
 tar -tzf "$GC_MODEL_OUTPUT"/*.tar.gz
 ```
 
-The model archive listing must contain only the four model artifact files at its
-root. Record at least:
+The single-model archive listing contains the four legacy artifact files at its
+root. An ensemble archive contains only the manifest and policy at root plus
+the exact per-member `config.yaml`/`weights.pth` pairs declared in the manifest.
+Record at least:
 
 - repository commit and whether the source tree was clean;
 - complete training-run directory name and exact checkpoint path;
@@ -254,7 +308,7 @@ Upload the two artifacts according to their distinct roles:
 | Local artifact | Grand Challenge destination |
 |---|---|
 | Docker image `.tar.gz` from `GC_IMAGE_OUTPUT` | Algorithm container image |
-| Training-run-named `.tar.gz` from `GC_MODEL_OUTPUT` | Algorithm model expanded beneath `/opt/ml/model/` |
+| `algorithmmodel.tar.gz` from `GC_MODEL_OUTPUT` | Algorithm model expanded beneath `/opt/ml/model/` |
 
 Attach the model to the algorithm version that uses the matching image. A
 successful hosted result should show the expected image source fingerprint,

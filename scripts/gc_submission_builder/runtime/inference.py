@@ -13,7 +13,10 @@ import torch
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
-from scripts.gc_submission_builder.release_manifest import verify_artifact_manifest
+from scripts.gc_submission_builder.release_manifest import (
+    artifact_members,
+    verify_artifact_manifest,
+)
 from scripts.gc_submission_builder.runtime.image_io import (
     MedicalImageInspection,
     canonicalize_image_inputs,
@@ -39,8 +42,11 @@ from src.inference.contracts import (
     PreprocessedCase,
     PredictorCapabilities,
 )
+from src.inference.ensemble import model_ensemble_contract
 from src.inference.pipeline import (
+    EnsembleProbabilityExecutor,
     ModelProbabilityExecutor,
+    build_ensemble_probability_executor,
     build_model_probability_executor,
     predict_preprocessed_case,
 )
@@ -124,10 +130,10 @@ class GcCasePrediction:
 
 @dataclass(frozen=True)
 class GcInferenceRuntime:
-    """Initialized, single-model Grand Challenge inference service."""
+    """Initialized arbitrary-N Grand Challenge inference service."""
 
     config: DictConfig
-    executor: ModelProbabilityExecutor
+    executor: ModelProbabilityExecutor | EnsembleProbabilityExecutor
     case_producer: PreprocessedCaseProducer
     interface_manifest: InterfaceManifest
     runtime_profile: InferenceRuntime
@@ -423,7 +429,11 @@ def initialize_runtime(
     stage_started = clock()
     try:
         artifact_manifest = verify_artifact_manifest(root)
-        saved_cfg = OmegaConf.load(root / "config.yaml")
+        discovered_members = artifact_members(root, artifact_manifest)
+        saved_member_configs = tuple(
+            (member, OmegaConf.load(member.config_path))
+            for member in discovered_members
+        )
         policy_payload = yaml.safe_load(
             (root / "inference_policy.yaml").read_text(encoding="utf-8")
         )
@@ -467,19 +477,46 @@ def initialize_runtime(
             active_policy_payload["output_space"] = output_space_override
             policy_origin = "diagnostic_output_space_override"
 
-        config = OmegaConf.create(OmegaConf.to_container(saved_cfg, resolve=False))
-        OmegaConf.set_struct(config, False)
-        OmegaConf.update(config, "inference", active_policy_payload, merge=False)
-        resolved_policy = resolve_inference_policy(config)
-        validate_runtime_compatibility(
-            resolved_policy.policy,
-            runtime_profile,
-            AssessmentContext(requires_ground_truth=False, threshold_sweep=False),
-        )
-        if resolved_policy.source != "explicit_top_level":
-            raise GcRuntimeError(
-                "The archived inference policy must be the explicit top-level policy."
+        member_configs: list[tuple[Any, DictConfig]] = []
+        canonical_contract = None
+        resolved_policy = None
+        for member, saved_cfg in saved_member_configs:
+            member_config = OmegaConf.create(
+                OmegaConf.to_container(saved_cfg, resolve=False)
             )
+            OmegaConf.set_struct(member_config, False)
+            OmegaConf.update(
+                member_config, "inference", active_policy_payload, merge=False
+            )
+            member_policy = resolve_inference_policy(member_config)
+            validate_runtime_compatibility(
+                member_policy.policy,
+                runtime_profile,
+                AssessmentContext(requires_ground_truth=False, threshold_sweep=False),
+            )
+            if member_policy.source != "explicit_top_level":
+                raise GcRuntimeError(
+                    "The archived inference policy must be the explicit top-level policy."
+                )
+            contract = model_ensemble_contract(member_config)
+            if canonical_contract is None:
+                canonical_contract = contract
+                resolved_policy = member_policy
+            elif contract != canonical_contract:
+                raise GcRuntimeError(
+                    f"Discovered model member {member.member_id!r} is incompatible with "
+                    "the canonical model/preprocessing contract."
+                )
+            member_configs.append((member, member_config))
+        if not member_configs or resolved_policy is None:
+            raise GcRuntimeError("No model members were discovered under /opt/ml/model.")
+        if len(member_configs) > 1 and not resolved_policy.policy.ensemble.enabled:
+            raise GcRuntimeError(
+                "Multiple model members were discovered, but "
+                "inference.ensemble.enabled is not true. Member count is discovered "
+                "from the artifact and must not be configured separately."
+            )
+        config = member_configs[0][1]
         resolved_device = _resolve_device(device, runtime_profile)
         dataset_id = _required_dataset_id(config)
     except Exception as exc:
@@ -500,13 +537,23 @@ def initialize_runtime(
 
     stage_started = clock()
     try:
-        model = load_model_strict(
-            config,
-            root / "weights.pth",
-            device=resolved_device,
-        )
-        executor = build_model_probability_executor(backend=model, cfg=config)
-        _validate_initial_capabilities(executor.predictor.capabilities)
+        loaded_members: list[tuple[str, Any, DictConfig]] = []
+        for member, member_config in member_configs:
+            model = load_model_strict(
+                member_config,
+                member.weights_path,
+                device=resolved_device,
+            )
+            loaded_members.append((member.member_id, model, member_config))
+        if resolved_policy.policy.ensemble.enabled:
+            executor = build_ensemble_probability_executor(loaded_members)
+            _validate_initial_capabilities(executor.predictor_capabilities)
+        else:
+            _member_id, model, member_config = loaded_members[0]
+            executor = build_model_probability_executor(
+                backend=model, cfg=member_config
+            )
+            _validate_initial_capabilities(executor.predictor.capabilities)
     except Exception as exc:
         timings["model_construction_checkpoint_load_seconds"] = max(
             0.0, clock() - stage_started
@@ -570,9 +617,35 @@ def initialize_runtime(
         outcome="succeeded",
         identity=dict(runtime_identity()),
         artifact={
-            "config_sha256": artifact_manifest["config_sha256"],
+            "artifact_schema_version": artifact_manifest.get(
+                "artifact_schema_version", 1
+            ),
             "inference_policy_sha256": artifact_manifest[
                 "inference_policy_sha256"
+            ],
+            "members": [
+                {
+                    "id": member.member_id,
+                    "config_sha256": (
+                        artifact_manifest["config_sha256"]
+                        if "artifact_schema_version" not in artifact_manifest
+                        else next(
+                            record["config_sha256"]
+                            for record in artifact_manifest["members"]
+                            if record["id"] == member.member_id
+                        )
+                    ),
+                    "weights_sha256": (
+                        artifact_manifest["weights_sha256"]
+                        if "artifact_schema_version" not in artifact_manifest
+                        else next(
+                            record["weights_sha256"]
+                            for record in artifact_manifest["members"]
+                            if record["id"] == member.member_id
+                        )
+                    ),
+                }
+                for member in discovered_members
             ],
         },
         dataset=dataset_id,
@@ -604,7 +677,16 @@ def initialize_runtime(
             }
             for interface in interface_manifest.interfaces
         ],
-        model=_model_summary(model),
+        ensemble={
+            "enabled": resolved_policy.policy.ensemble.enabled,
+            "method": resolved_policy.policy.ensemble.method,
+            "member_count": len(loaded_members),
+            "member_ids": [member_id for member_id, _model, _cfg in loaded_members],
+        },
+        models={
+            member_id: _model_summary(member_model)
+            for member_id, member_model, _cfg in loaded_members
+        },
         timings_seconds=timings,
         resources=dict(resource_summary(device=resolved_device)),
     )

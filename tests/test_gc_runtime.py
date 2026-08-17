@@ -21,6 +21,10 @@ from scripts.gc_submission_builder.runtime.inference import (
 )
 from scripts.gc_submission_builder.runtime.interfaces import load_interface_manifest
 from scripts.gc_submission_builder.runtime.interfaces import validate_dataset_bindings
+from scripts.gc_submission_builder.release_manifest import (
+    create_ensemble_artifact_manifest,
+    write_artifact_manifest,
+)
 from src.inference.case_producer import build_case_producer
 from src.inference.contracts import (
     PredictorCapabilities,
@@ -126,7 +130,135 @@ artifacts: {{enabled: false}}
     return model
 
 
+def _write_ensemble_model_files(root: Path) -> Path:
+    model = root / "ensemble_model"
+    members_root = model / "members"
+    members_root.mkdir(parents=True)
+    config = OmegaConf.create(
+        {
+            "dataset": {
+                "id": "isles26",
+                "modalities": ["t1raw"],
+                "num_modalities": 1,
+                "preprocessing_configs": {
+                    "roi": {
+                        "volume_3d": [8, 8, 8],
+                        "slices_2d": [8, 8],
+                    }
+                },
+            },
+            "data_mode": {"dim": "3d"},
+            "model": {
+                "image_size": 8,
+                "spatial_dims": 3,
+                "image_channels": 1,
+                "out_channels": 1,
+            },
+            "diffusion": {"type": "Discriminative"},
+        }
+    )
+    records = []
+    for index in range(1, 4):
+        member_id = f"fold{index}"
+        member_dir = members_root / member_id
+        member_dir.mkdir()
+        OmegaConf.save(config, member_dir / "config.yaml")
+        (member_dir / "weights.pth").write_bytes(f"fixture-{member_id}".encode())
+        records.append(
+            {
+                "id": member_id,
+                "source_run": f"run-{member_id}",
+                "source_checkpoint": f"checkpoint-{member_id}.pth",
+            }
+        )
+    (model / "inference_policy.yaml").write_text(
+        """output_space: native_input
+precision: fp32
+sliding_window:
+  enabled: true
+  sw_batch_size: 1
+  overlap: 0.5
+  blend_mode: gaussian
+  padding_mode: constant
+tta: {enabled: false}
+ensemble: {enabled: true, method: mean}
+decision: {threshold: 0.5}
+postprocessing: {enabled: false}
+artifacts: {enabled: false}
+""",
+        encoding="utf-8",
+    )
+    manifest = create_ensemble_artifact_manifest(
+        artifact_dir=model,
+        created_at_utc="2000-01-01T00:00:00Z",
+        code_commit="test-commit",
+        code_dirty=False,
+        members=records,
+    )
+    write_artifact_manifest(manifest, model / "artifact_manifest.json")
+    return model
+
+
 class TestGcRuntime(unittest.TestCase):
+    def test_initialization_discovers_and_loads_all_three_artifact_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model_dir = _write_ensemble_model_files(root)
+            interface_path = _write_manifest(root)
+            runtime_path = _write_runtime_profile(root)
+            capabilities = PredictorCapabilities(
+                model_family="discriminative",
+                spatial_dims=3,
+                input_channels=1,
+                output_channels=1,
+                supported_precisions=("fp32",),
+            )
+            producer = SimpleNamespace(
+                required_raw_keys=("T1",),
+                adapter=SimpleNamespace(dataset_id="isles26"),
+            )
+
+            def build_ensemble(members):
+                policy = parse_inference_policy(
+                    members[0][2].inference,
+                    model_roi=(8, 8, 8),
+                )
+                return SimpleNamespace(
+                    policy=policy,
+                    policy_source="explicit_top_level",
+                    predictor_capabilities=capabilities,
+                    member_ids=tuple(member[0] for member in members),
+                )
+
+            with patch(
+                "scripts.gc_submission_builder.runtime.inference.load_model_strict",
+                return_value=object(),
+            ) as load_model, patch(
+                "scripts.gc_submission_builder.runtime.inference."
+                "build_ensemble_probability_executor",
+                side_effect=build_ensemble,
+            ) as build_executor, patch(
+                "scripts.gc_submission_builder.runtime.inference.build_case_producer",
+                return_value=producer,
+            ):
+                initialized = initialize_runtime(
+                    model_dir=model_dir,
+                    interface_manifest_path=interface_path,
+                    runtime_profile_path=runtime_path,
+                    device="cpu",
+                )
+
+            self.assertEqual(load_model.call_count, 3)
+            loaded_members = build_executor.call_args.args[0]
+            self.assertEqual(
+                tuple(member_id for member_id, _model, _config in loaded_members),
+                ("fold1", "fold2", "fold3"),
+            )
+            self.assertEqual(
+                initialized.executor.member_ids,
+                ("fold1", "fold2", "fold3"),
+            )
+
     def test_fixture_manifests_bind_registered_isles24_and_isles26_adapters(self):
         cases = (
             ("isles24", "NCCT", "NCCT"),
@@ -186,7 +318,10 @@ class TestGcRuntime(unittest.TestCase):
                 adapter=SimpleNamespace(dataset_id="isles26"),
             )
             artifact = {
+                "source_run": "fixture-run",
+                "source_checkpoint": "fixture-checkpoint.pth",
                 "config_sha256": "config-hash",
+                "weights_sha256": "weights-hash",
                 "inference_policy_sha256": "policy-hash",
             }
             with patch(
@@ -246,7 +381,10 @@ class TestGcRuntime(unittest.TestCase):
                 adapter=SimpleNamespace(dataset_id="isles26"),
             )
             artifact = {
+                "source_run": "fixture-run",
+                "source_checkpoint": "fixture-checkpoint.pth",
                 "config_sha256": "config-hash",
+                "weights_sha256": "weights-hash",
                 "inference_policy_sha256": "policy-hash",
             }
             with patch(
@@ -310,7 +448,10 @@ class TestGcRuntime(unittest.TestCase):
                 adapter=SimpleNamespace(dataset_id="isles26"),
             )
             artifact = {
+                "source_run": "fixture-run",
+                "source_checkpoint": "fixture-checkpoint.pth",
                 "config_sha256": "config-hash",
+                "weights_sha256": "weights-hash",
                 "inference_policy_sha256": "policy-hash",
             }
 

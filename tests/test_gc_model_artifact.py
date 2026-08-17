@@ -13,7 +13,10 @@ from unittest.mock import patch
 import yaml
 from omegaconf import OmegaConf
 
-from scripts.gc_submission_builder.build_config import ModelArtifactBuildConfig
+from scripts.gc_submission_builder.build_config import (
+    ModelArtifactBuildConfig,
+    ModelArtifactMemberBuildConfig,
+)
 from scripts.gc_submission_builder.model_artifact import (
     ARTIFACT_DIRECTORY_NAME,
     MODEL_BUILD_REPORT_NAME,
@@ -25,6 +28,7 @@ from scripts.gc_submission_builder.model_artifact import (
 from scripts.gc_submission_builder.release_manifest import (
     ARTIFACT_FILENAMES,
     ArtifactManifestError,
+    artifact_members,
     sha256_file,
     verify_artifact_manifest,
 )
@@ -122,6 +126,86 @@ def _build_config(run_dir: Path, policy_path: Path, output_dir: Path) -> ModelAr
 
 
 class TestGcModelArtifact(unittest.TestCase):
+    def test_three_member_artifact_discovers_members_without_a_count_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_members = []
+            policy = None
+            for index in range(1, 4):
+                run_dir, _checkpoint, member_policy = _write_source_tree(
+                    root / f"source_{index}"
+                )
+                source_members.append(
+                    ModelArtifactMemberBuildConfig(
+                        member_id=f"fold{index}",
+                        run_dir=run_dir,
+                        checkpoint="selected_model",
+                    )
+                )
+                policy = member_policy
+            assert policy is not None
+            policy_payload = yaml.safe_load(policy.read_text(encoding="utf-8"))
+            policy_payload["ensemble"] = {"enabled": True, "method": "mean"}
+            policy.write_text(
+                yaml.safe_dump(policy_payload, sort_keys=False),
+                encoding="utf-8",
+            )
+            config = ModelArtifactBuildConfig(
+                run_dir=None,
+                checkpoint=None,
+                use_ema=False,
+                inference_policy_path=policy,
+                output_dir=root / "out",
+                archive_name="algorithmmodel.tar.gz",
+                validation_device="cpu",
+                code_commit="test-commit",
+                code_dirty=False,
+                created_at_utc="2000-01-01T00:00:00Z",
+                members=tuple(source_members),
+            )
+
+            with patch(
+                "scripts.gc_submission_builder.model_artifact.validate_model_artifact",
+                return_value=SimpleNamespace(as_dict=lambda: {"status": "passed"}),
+            ):
+                result = build_model_artifact(config)
+
+            manifest = verify_artifact_manifest(result.artifact_dir)
+            discovered = artifact_members(result.artifact_dir, manifest)
+            self.assertEqual(manifest["artifact_schema_version"], 2)
+            self.assertNotIn("member_count", manifest)
+            self.assertEqual(
+                tuple(member.member_id for member in discovered),
+                ("fold1", "fold2", "fold3"),
+            )
+            self.assertEqual(
+                sorted(
+                    path.relative_to(result.artifact_dir).as_posix()
+                    for path in result.artifact_dir.rglob("*")
+                    if path.is_file()
+                ),
+                [
+                    "artifact_manifest.json",
+                    "inference_policy.yaml",
+                    "members/fold1/config.yaml",
+                    "members/fold1/weights.pth",
+                    "members/fold2/config.yaml",
+                    "members/fold2/weights.pth",
+                    "members/fold3/config.yaml",
+                    "members/fold3/weights.pth",
+                ],
+            )
+            with tarfile.open(result.archive_path, "r:gz") as archive:
+                self.assertNotIn("member_count", json.dumps(manifest))
+                self.assertEqual(
+                    sorted(archive.getnames()),
+                    sorted(
+                        path.relative_to(result.artifact_dir).as_posix()
+                        for path in result.artifact_dir.rglob("*")
+                        if path.is_file()
+                    ),
+                )
+
     def test_release_checkpoint_selection_rejects_ambiguity_and_accepts_exact_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir, expected, _policy = _write_source_tree(Path(tmp))
@@ -270,7 +354,7 @@ class TestGcModelArtifact(unittest.TestCase):
         invalid_cases = (
             ({"diffusion_type": "OpenAI_DDPM"}, "generative"),
             ({"spatial_dims": 2}, "3D"),
-            ({"dataset_id": "unknown"}, "registered preprocessing adapter"),
+            ({"dataset_id": "unknown"}, "preprocessing adapter is registered"),
         )
         for options, message in invalid_cases:
             with self.subTest(options=options), tempfile.TemporaryDirectory() as tmp:

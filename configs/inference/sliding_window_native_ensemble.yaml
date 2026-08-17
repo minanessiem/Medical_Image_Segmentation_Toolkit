@@ -1,0 +1,8 @@
+defaults:
+  - sliding_window_native
+  - _self_
+
+# Member count is discovered from /opt/ml/model/members. Do not duplicate it here.
+ensemble:
+  enabled: true
+  method: mean

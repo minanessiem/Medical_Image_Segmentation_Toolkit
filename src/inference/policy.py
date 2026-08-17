@@ -9,6 +9,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 
 from src.inference.contracts import InvalidInferencePolicyError, SUPPORTED_OUTPUT_SPACES
+from src.inference.ensemble import SUPPORTED_ENSEMBLE_METHODS
 
 
 SUPPORTED_PRECISIONS = frozenset({"fp16", "fp32", "bf16"})
@@ -34,6 +35,7 @@ class TtaPolicy:
 @dataclass(frozen=True)
 class EnsemblePolicy:
     enabled: bool = False
+    method: str = "mean"
 
 
 @dataclass(frozen=True)
@@ -252,9 +254,15 @@ def _parse_tta(raw: Any) -> TtaPolicy:
 
 def _parse_ensemble(raw: Any) -> EnsemblePolicy:
     data = _plain_mapping(raw, "inference.ensemble")
-    _reject_unknown(data, {"enabled"}, "inference.ensemble")
-    enabled = _disabled_feature(data, "inference.ensemble")
-    return EnsemblePolicy(enabled=enabled)
+    _reject_unknown(data, {"enabled", "method"}, "inference.ensemble")
+    enabled = _boolean(data.get("enabled", False), "inference.ensemble.enabled")
+    method = str(data.get("method", "mean")).strip().lower()
+    if method not in SUPPORTED_ENSEMBLE_METHODS:
+        raise InvalidInferencePolicyError(
+            "inference.ensemble.method must be one of "
+            f"{sorted(SUPPORTED_ENSEMBLE_METHODS)}, got {method!r}."
+        )
+    return EnsemblePolicy(enabled=enabled, method=method)
 
 
 def _parse_decision(raw: Any) -> DecisionPolicy:

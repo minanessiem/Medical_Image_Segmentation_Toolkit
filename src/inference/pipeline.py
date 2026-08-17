@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, ContextManager, Mapping, Optional
+from typing import Any, ContextManager, Iterable, Mapping, Optional, Tuple
 
 import torch
 from monai.data import MetaTensor
@@ -16,6 +16,7 @@ from src.inference.contracts import (
     ProbabilityPredictor,
     UnsupportedModelError,
 )
+from src.inference.ensemble import MeanProbabilityAccumulator
 from src.inference.policy import InferencePolicy, resolve_inference_policy
 from src.inference.predictors import (
     build_probability_predictor,
@@ -68,6 +69,79 @@ class ModelProbabilityExecutor:
             return predict_probabilities(self.predictor, conditioned_image)
 
 
+@dataclass(frozen=True)
+class EnsembleMemberExecutor:
+    """One named, independently prepared member of a probability ensemble."""
+
+    member_id: str
+    executor: ModelProbabilityExecutor
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.member_id, str) or not self.member_id.strip():
+            raise UnsupportedModelError("Ensemble member_id must be a non-empty string.")
+
+
+@dataclass(frozen=True)
+class EnsembleProbabilityExecutor:
+    """Execute and equally average every discovered model member."""
+
+    members: Tuple[EnsembleMemberExecutor, ...]
+    policy: InferencePolicy
+    policy_source: str
+
+    def __post_init__(self) -> None:
+        if not self.members:
+            raise UnsupportedModelError("An ensemble requires at least one model member.")
+        member_ids = tuple(member.member_id for member in self.members)
+        if len(set(member_ids)) != len(member_ids):
+            raise UnsupportedModelError("Ensemble member identifiers must be unique.")
+        if not self.policy.ensemble.enabled:
+            raise UnsupportedModelError(
+                "A multi-member executor requires inference.ensemble.enabled=true."
+            )
+        expected_capabilities = self.members[0].executor.predictor.capabilities
+        for member in self.members:
+            if member.executor.policy != self.policy:
+                raise UnsupportedModelError(
+                    f"Ensemble member {member.member_id!r} resolved a different inference policy."
+                )
+            if member.executor.predictor.capabilities != expected_capabilities:
+                raise UnsupportedModelError(
+                    "All ensemble members must expose identical predictor capabilities; "
+                    f"member {member.member_id!r} is incompatible."
+                )
+
+    @property
+    def member_ids(self) -> Tuple[str, ...]:
+        return tuple(member.member_id for member in self.members)
+
+    @property
+    def predictor_capabilities(self):
+        return self.members[0].executor.predictor.capabilities
+
+    def __call__(
+        self,
+        conditioned_image: torch.Tensor,
+        progress_label: Optional[str] = None,
+        show_window_progress: bool = True,
+    ) -> torch.Tensor:
+        accumulator = MeanProbabilityAccumulator()
+        for member in self.members:
+            member_label = (
+                f"{progress_label}:{member.member_id}"
+                if progress_label
+                else member.member_id
+            )
+            accumulator.add(
+                member.executor(
+                    conditioned_image,
+                    progress_label=member_label,
+                    show_window_progress=show_window_progress,
+                )
+            )
+        return accumulator.mean()
+
+
 def build_model_probability_executor(
     backend: Any,
     cfg: Mapping[str, Any] | DictConfig,
@@ -83,8 +157,33 @@ def build_model_probability_executor(
     )
 
 
+def build_ensemble_probability_executor(
+    members: Iterable[tuple[str, Any, Mapping[str, Any] | DictConfig]],
+) -> EnsembleProbabilityExecutor:
+    """Build an arbitrary-N equal-weight ensemble from discovered members."""
+
+    prepared: list[EnsembleMemberExecutor] = []
+    canonical_policy: InferencePolicy | None = None
+    canonical_source: str | None = None
+    for member_id, backend, cfg in members:
+        executor = build_model_probability_executor(backend=backend, cfg=cfg)
+        if canonical_policy is None:
+            canonical_policy = executor.policy
+            canonical_source = executor.policy_source
+        prepared.append(
+            EnsembleMemberExecutor(member_id=str(member_id), executor=executor)
+        )
+    if canonical_policy is None or canonical_source is None:
+        raise UnsupportedModelError("No ensemble model members were supplied.")
+    return EnsembleProbabilityExecutor(
+        members=tuple(prepared),
+        policy=canonical_policy,
+        policy_source=canonical_source,
+    )
+
+
 def predict_preprocessed_case(
-    executor: ModelProbabilityExecutor,
+    executor: ModelProbabilityExecutor | EnsembleProbabilityExecutor,
     case: PreprocessedCase,
     *,
     progress_label: Optional[str] = None,
@@ -125,6 +224,7 @@ def predict_preprocessed_case(
         restoration_applied = False
 
     mask = threshold_probability(probability, executor.policy.decision.threshold)
+    member_ids = tuple(getattr(executor, "member_ids", ()))
     return PredictionResult(
         probability=probability,
         mask=mask,
@@ -140,6 +240,12 @@ def predict_preprocessed_case(
             "inference_policy_source": str(executor.policy_source),
             "output_space": output_space,
             "threshold": float(executor.policy.decision.threshold),
+            "ensemble": {
+                "enabled": bool(member_ids),
+                "method": executor.policy.ensemble.method if member_ids else None,
+                "member_count": len(member_ids) if member_ids else 1,
+                "member_ids": list(member_ids),
+            },
             "spatial_validation": {
                 "status": "passed",
                 "shape_matches_declared_geometry": True,
@@ -186,7 +292,10 @@ def _autocast_context(
 
 
 __all__ = [
+    "EnsembleMemberExecutor",
+    "EnsembleProbabilityExecutor",
     "ModelProbabilityExecutor",
+    "build_ensemble_probability_executor",
     "build_model_probability_executor",
     "predict_preprocessed_case",
 ]

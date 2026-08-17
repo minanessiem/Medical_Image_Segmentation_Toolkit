@@ -43,7 +43,7 @@ class TestGcBuilderConfig(unittest.TestCase):
         self.assertEqual(config.run_dir, run_dir.resolve())
         self.assertEqual(config.checkpoint, "best_model")
         self.assertEqual(config.output_dir, output_dir.resolve())
-        self.assertEqual(config.archive_name, "full_model_directory_name.tar.gz")
+        self.assertEqual(config.archive_name, "algorithmmodel.tar.gz")
         self.assertEqual(config.validation_device, "cpu")
         self.assertTrue(config.inference_policy_path.is_file())
         self.assertEqual(config.inference_policy_path.name, "sliding_window_native_fp16.yaml")
@@ -66,6 +66,48 @@ class TestGcBuilderConfig(unittest.TestCase):
             )
 
         self.assertEqual(config.archive_name, "manually_selected_name.tar.gz")
+
+    def test_member_list_is_the_only_source_of_ensemble_cardinality(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "policy.yaml").write_text(
+                "ensemble: {enabled: true, method: mean}\n",
+                encoding="utf-8",
+            )
+            path = root / "builder.yaml"
+            path.write_text(
+                yaml.safe_dump(
+                    {
+                        "members": [
+                            {
+                                "id": f"fold{index}",
+                                "run_dir": f"runs/fold{index}",
+                                "checkpoint": "best_model",
+                            }
+                            for index in range(1, 4)
+                        ],
+                        "inference_policy": "policy.yaml",
+                        "output_dir": "out",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_model_artifact_build_config(path)
+
+            self.assertEqual(config.run_dir, None)
+            self.assertEqual(config.checkpoint, None)
+            self.assertEqual(
+                tuple(member.member_id for member in config.members),
+                ("fold1", "fold2", "fold3"),
+            )
+            self.assertEqual(config.archive_name, "algorithmmodel.tar.gz")
+
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            raw["num_models"] = 3
+            path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+            with self.assertRaisesRegex(BuilderConfigError, "unknown keys.*num_models"):
+                load_model_artifact_build_config(path)
 
     def test_unknown_or_model_owned_builder_fields_fail(self):
         with tempfile.TemporaryDirectory() as tmp:

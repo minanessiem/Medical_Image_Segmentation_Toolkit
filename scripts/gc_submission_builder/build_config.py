@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Tuple
 
 import yaml
 from omegaconf import OmegaConf
@@ -24,8 +24,10 @@ ALLOWED_CONFIG_KEYS = frozenset(
         "code_commit",
         "code_dirty",
         "created_at_utc",
+        "members",
     }
 )
+ALLOWED_MEMBER_KEYS = frozenset({"id", "run_dir", "checkpoint", "use_ema"})
 
 
 class BuilderConfigError(ValueError):
@@ -33,11 +35,21 @@ class BuilderConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class ModelArtifactMemberBuildConfig:
+    """One explicitly selected source model; member count is list-derived."""
+
+    member_id: str
+    run_dir: Path
+    checkpoint: str
+    use_ema: bool = False
+
+
+@dataclass(frozen=True)
 class ModelArtifactBuildConfig:
     """Builder-only inputs; trained model attributes deliberately do not appear."""
 
-    run_dir: Path
-    checkpoint: str
+    run_dir: Path | None
+    checkpoint: str | None
     use_ema: bool
     inference_policy_path: Path
     output_dir: Path
@@ -46,6 +58,23 @@ class ModelArtifactBuildConfig:
     code_commit: str | None = None
     code_dirty: bool | None = None
     created_at_utc: str | None = None
+    members: Tuple[ModelArtifactMemberBuildConfig, ...] = ()
+
+    def resolved_members(self) -> Tuple[ModelArtifactMemberBuildConfig, ...]:
+        if self.members:
+            return self.members
+        if self.run_dir is None or self.checkpoint is None:
+            raise BuilderConfigError(
+                "Specify either members or the legacy run_dir/checkpoint pair."
+            )
+        return (
+            ModelArtifactMemberBuildConfig(
+                member_id="model",
+                run_dir=self.run_dir,
+                checkpoint=self.checkpoint,
+                use_ema=self.use_ema,
+            ),
+        )
 
 
 def load_model_artifact_build_config(
@@ -73,11 +102,28 @@ def load_model_artifact_build_config(
         )
     values = {**raw, **override_values}
 
-    run_dir = _required_path(
-        values.get("run_dir"),
-        field_name="run_dir",
-        base_dir=Path.cwd() if "run_dir" in override_values else path.parent,
+    members = _parse_members(
+        values.get("members"),
+        base_dir=Path.cwd() if "members" in override_values else path.parent,
     )
+    run_dir = None
+    checkpoint = None
+    if members:
+        if values.get("run_dir") is not None or values.get("checkpoint") is not None:
+            raise BuilderConfigError(
+                "members is mutually exclusive with run_dir/checkpoint."
+            )
+        if values.get("use_ema", False) is not False:
+            raise BuilderConfigError(
+                "Top-level use_ema is not valid with members; set it per member."
+            )
+    else:
+        run_dir = _required_path(
+            values.get("run_dir"),
+            field_name="run_dir",
+            base_dir=Path.cwd() if "run_dir" in override_values else path.parent,
+        )
+        checkpoint = _required_string(values.get("checkpoint"), "checkpoint")
     output_dir = _required_path(
         values.get("output_dir"),
         field_name="output_dir",
@@ -90,10 +136,9 @@ def load_model_artifact_build_config(
             Path.cwd() if "inference_policy" in override_values else path.parent
         ),
     )
-    checkpoint = _required_string(values.get("checkpoint"), "checkpoint")
     raw_archive_name = values.get("archive_name")
     archive_name = (
-        f"{run_dir.name}.tar.gz"
+        "algorithmmodel.tar.gz"
         if raw_archive_name is None
         else _required_string(raw_archive_name, "archive_name")
     )
@@ -135,7 +180,57 @@ def load_model_artifact_build_config(
         code_commit=code_commit,
         code_dirty=code_dirty,
         created_at_utc=created_at_utc,
+        members=members,
     )
+
+
+def _parse_members(value: Any, *, base_dir: Path) -> Tuple[ModelArtifactMemberBuildConfig, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not value:
+        raise BuilderConfigError("members must be a non-empty list when provided.")
+    parsed: list[ModelArtifactMemberBuildConfig] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(value):
+        if not isinstance(raw, Mapping):
+            raise BuilderConfigError(f"members[{index}] must be a mapping.")
+        unknown = sorted(set(raw) - ALLOWED_MEMBER_KEYS)
+        if unknown:
+            raise BuilderConfigError(
+                f"members[{index}] contains unknown keys: {unknown}."
+            )
+        member_id = _required_string(raw.get("id"), f"members[{index}].id")
+        allowed_characters = (
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        )
+        if (
+            any(character not in allowed_characters for character in member_id)
+            or not member_id[0].isalnum()
+        ):
+            raise BuilderConfigError(
+                f"members[{index}].id must match [A-Za-z0-9][A-Za-z0-9._-]*."
+            )
+        if member_id in seen:
+            raise BuilderConfigError(f"Duplicate member id {member_id!r}.")
+        seen.add(member_id)
+        use_ema = raw.get("use_ema", False)
+        if type(use_ema) is not bool:
+            raise BuilderConfigError(f"members[{index}].use_ema must be a boolean.")
+        parsed.append(
+            ModelArtifactMemberBuildConfig(
+                member_id=member_id,
+                run_dir=_required_path(
+                    raw.get("run_dir"),
+                    field_name=f"members[{index}].run_dir",
+                    base_dir=base_dir,
+                ),
+                checkpoint=_required_string(
+                    raw.get("checkpoint"), f"members[{index}].checkpoint"
+                ),
+                use_ema=use_ema,
+            )
+        )
+    return tuple(parsed)
 
 
 def compose_inference_policy_file(path: str | Path) -> dict[str, Any]:
@@ -234,6 +329,7 @@ __all__ = [
     "BuilderConfigError",
     "DEFAULT_CONFIG_PATH",
     "ModelArtifactBuildConfig",
+    "ModelArtifactMemberBuildConfig",
     "compose_inference_policy_file",
     "load_model_artifact_build_config",
 ]

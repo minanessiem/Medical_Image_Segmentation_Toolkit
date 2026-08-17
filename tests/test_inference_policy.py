@@ -85,7 +85,7 @@ class TestInferencePolicyParsing(unittest.TestCase):
         self.assertFalse(explicit_direct.sliding_window.enabled)
 
     def test_unimplemented_features_are_disabled_stubs(self):
-        feature_names = ("tta", "ensemble", "postprocessing", "artifacts")
+        feature_names = ("tta", "postprocessing", "artifacts")
         for feature_name in feature_names:
             with self.subTest(feature=feature_name):
                 policy = self._parse(
@@ -106,7 +106,6 @@ class TestInferencePolicyParsing(unittest.TestCase):
 
         premature_settings = (
             {"tta": {"enabled": False, "transforms": []}},
-            {"ensemble": {"enabled": False, "method": "mean"}},
             {"postprocessing": {"enabled": False, "connectivity": 26}},
             {"artifacts": {"enabled": False, "retain_model_space_probability": True}},
         )
@@ -117,6 +116,32 @@ class TestInferencePolicyParsing(unittest.TestCase):
             with self.subTest(raw_policy=raw_policy):
                 with self.assertRaisesRegex(InvalidInferencePolicyError, "unknown keys"):
                     self._parse(raw_policy)
+
+    def test_ensemble_supports_mean_without_a_configured_member_count(self):
+        policy = self._parse(
+            {"ensemble": {"enabled": True, "method": "mean"}}
+        )
+        self.assertTrue(policy.ensemble.enabled)
+        self.assertEqual(policy.ensemble.method, "mean")
+
+        with self.assertRaisesRegex(
+            InvalidInferencePolicyError,
+            "unknown keys.*member_count",
+        ):
+            self._parse(
+                {
+                    "ensemble": {
+                        "enabled": True,
+                        "method": "mean",
+                        "member_count": 3,
+                    }
+                }
+            )
+
+        with self.assertRaisesRegex(InvalidInferencePolicyError, "method"):
+            self._parse(
+                {"ensemble": {"enabled": True, "method": "median"}}
+            )
 
     def test_removed_placeholder_fields_are_rejected(self):
         for field_name, value in (
@@ -320,6 +345,7 @@ class TestInferencePolicyParsing(unittest.TestCase):
             "direct_model_space.yaml": {"defaults", "sliding_window"},
             "sliding_window_native.yaml": {"defaults", "output_space"},
             "sliding_window_native_fp16.yaml": {"defaults", "precision"},
+            "sliding_window_native_ensemble.yaml": {"defaults", "ensemble"},
         }
 
         for filename, keys in expected_keys.items():
@@ -334,6 +360,7 @@ class TestInferencePolicyParsing(unittest.TestCase):
                 "sliding_window_model_space.yaml",
                 "sliding_window_native.yaml",
                 "sliding_window_native_fp16.yaml",
+                "sliding_window_native_ensemble.yaml",
             },
         )
 
