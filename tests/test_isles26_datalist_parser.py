@@ -7,6 +7,42 @@ from src.data.loader_stack.isles26_loader import datafold_read
 
 
 class TestIsles26DatalistParser(unittest.TestCase):
+    def test_datafold_read_fold_subset_does_not_require_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            datalist_path = base / "dataset.json"
+            datalist_path.write_text(
+                json.dumps(
+                    {
+                        "training": [
+                            {
+                                "caseID": "fold-zero",
+                                "fold": 0,
+                                "T1": ["fold-zero/t1.nii.gz"],
+                                "label": "fold-zero/label.nii.gz",
+                            },
+                            {
+                                "caseID": "fold-one",
+                                "fold": 1,
+                                "T1": ["fold-one/t1.nii.gz"],
+                                "label": "fold-one/label.nii.gz",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            records = datafold_read(
+                datalist=str(datalist_path),
+                basedir=str(base),
+                subset_name="val_full",
+                partitioning="fold",
+                subset_definitions={"val_full": {"fold_in": (0,)}},
+            )
+            self.assertEqual([record["caseID"] for record in records], ["fold-zero"])
+            self.assertEqual(records[0]["fold"], 0)
+            self.assertNotIn("split", records[0])
+
     def test_datafold_read_split_subset_and_union(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

@@ -10,7 +10,10 @@ import torch
 from monai.data import MetaTensor
 
 from src.inference.contracts import SpatialGeometry, SpatialRestorationError, SpatialTrace
-from src.inference.spatial import restore_probability_to_native
+from src.inference.spatial import (
+    restore_probability_to_native,
+    validate_output_geometry,
+)
 
 
 def _affine_tuple(affine: np.ndarray):
@@ -161,6 +164,47 @@ class TestInferenceSpatialRoundTrip(unittest.TestCase):
         ).unsqueeze(0).unsqueeze(0)
 
         torch.testing.assert_close(restored, expected, rtol=0, atol=1e-6)
+
+    def test_near_equivalent_nifti_qform_sform_rounding_is_accepted(self):
+        native_affine = np.array(
+            [
+                [0.998809814, 0.025174877, 0.041774701, -119.675789],
+                [-0.027847558, 0.997482359, 0.064658277, -90.232483],
+                [-0.040043227, -0.065742239, 0.997032702, -121.763542],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        model_affine = np.array(
+            [
+                [0.998809814, 0.025175797, 0.041774701, -119.675789],
+                [-0.027847556, 0.997518837, 0.064658277, -90.232483],
+                [-0.040043227, -0.065744646, 0.997032702, -121.763542],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        probability = torch.linspace(0.0, 1.0, 5**3).reshape(1, 1, 5, 5, 5)
+        trace = _trace(
+            (5, 5, 5),
+            model_affine,
+            (5, 5, 5),
+            native_affine,
+        )
+
+        restored = restore_probability_to_native(probability, trace)
+
+        torch.testing.assert_close(restored, probability, rtol=0, atol=0)
+
+    def test_world_geometry_validation_rejects_real_mismatch(self):
+        expected = _geometry((5, 5, 5), np.eye(4))
+        shifted = np.eye(4)
+        shifted[0, 3] = 0.02
+
+        with self.assertRaisesRegex(SpatialRestorationError, "affine"):
+            validate_output_geometry(
+                observed_shape=(5, 5, 5),
+                observed_affine=shifted,
+                expected=expected,
+            )
 
     def test_changed_geometry_requires_a_supported_spatial_trace(self):
         trace = _trace(

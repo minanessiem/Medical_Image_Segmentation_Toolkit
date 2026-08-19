@@ -25,7 +25,13 @@ SUPPORTED_SPATIAL_OPERATIONS = frozenset(
         "SpatialPad",
     }
 )
-WORLD_COORDINATE_TOLERANCE_MM = 1e-4
+# NIfTI qform/sform values are stored with finite header precision.  MONAI may
+# legitimately retain one form when the other differs by only a few 1e-5 per
+# voxel; across a full brain volume that becomes several micrometres at a
+# corner.  Keep affine elements strict while allowing 0.01 mm world-space
+# rounding, far below the native voxel sizes used by the supported datasets.
+AFFINE_ELEMENT_TOLERANCE = 1e-4
+WORLD_COORDINATE_TOLERANCE_MM = 1e-2
 
 
 def restore_probability_to_native(
@@ -131,15 +137,16 @@ def validate_output_geometry(
         )
     observed_affine = np.asarray(observed_affine, dtype=np.float64)
     expected_affine = np.asarray(expected.affine, dtype=np.float64)
+    affine_tolerance = min(float(tolerance_mm), AFFINE_ELEMENT_TOLERANCE)
     if observed_affine.shape != (4, 4) or not np.allclose(
         observed_affine,
         expected_affine,
         rtol=0,
-        atol=tolerance_mm,
+        atol=affine_tolerance,
     ):
         raise SpatialRestorationError(
             "Restored affine does not match the native reference affine within "
-            f"{tolerance_mm} mm."
+            f"{affine_tolerance} per affine element."
         )
 
     corners = np.asarray(tuple(_corner_indices(expected.shape)), dtype=np.float64)
@@ -193,6 +200,7 @@ def _corner_indices(shape: tuple[int, int, int]) -> Iterable[tuple[int, int, int
 
 
 __all__ = [
+    "AFFINE_ELEMENT_TOLERANCE",
     "SUPPORTED_SPATIAL_OPERATIONS",
     "WORLD_COORDINATE_TOLERANCE_MM",
     "restore_probability_to_native",

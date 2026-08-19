@@ -655,15 +655,23 @@ def _normalize_case_record(
     record: Mapping[str, Any],
     basedir: str,
     *,
+    partitioning: str = "split",
     load_labels: bool = True,
 ) -> Dict[str, Any]:
     """
     Validate and normalize one ISLES26 datalist record.
     """
+    partitioning_token = str(partitioning).strip().lower()
+    if partitioning_token not in {"fold", "split"}:
+        raise ValueError(
+            "ISLES26 record normalization requires partitioning in {'fold', 'split'}."
+        )
+    selector_key = "fold" if partitioning_token == "fold" else "split"
     required_keys = (
-        ISLES26_REQUIRED_LABELED_RECORD_KEYS
-        if load_labels
-        else ISLES26_REQUIRED_RECORD_KEYS
+        "caseID",
+        ISLES26_MODALITY_KEY,
+        selector_key,
+        *(("label",) if load_labels else ()),
     )
     missing = [key for key in required_keys if key not in record]
     if missing:
@@ -678,17 +686,17 @@ def _normalize_case_record(
         field_name="caseID",
     )
 
-    split_value = record.get("split")
-    if not LoaderDataUtils.is_non_empty(split_value):
-        raise ValueError("ISLES26 record requires non-empty 'split' label.")
-    normalized["split"] = str(split_value).strip()
-
-    if "fold" in record and LoaderDataUtils.is_non_empty(record.get("fold")):
+    if partitioning_token == "split":
+        split_value = record.get("split")
+        if not LoaderDataUtils.is_non_empty(split_value):
+            raise ValueError("ISLES26 record requires non-empty 'split' label.")
+        normalized["split"] = str(split_value).strip()
+    else:
         try:
             normalized["fold"] = int(record.get("fold"))
         except Exception as exc:
             raise ValueError(
-                f"ISLES26 record has invalid optional 'fold' value: {record.get('fold')}."
+                f"ISLES26 record has invalid required 'fold' value: {record.get('fold')}."
             ) from exc
 
     normalized[ISLES26_MODALITY_KEY] = _normalize_t1_paths(
@@ -732,6 +740,7 @@ def _read_normalized_records(
     basedir,
     key="training",
     *,
+    partitioning: str = "split",
     load_labels: bool = True,
 ):
     datalist_path = os.path.expanduser(str(datalist))
@@ -762,6 +771,7 @@ def _read_normalized_records(
             normalized_record = _normalize_case_record(
                 record=record,
                 basedir=basedir_path,
+                partitioning=partitioning,
                 load_labels=load_labels,
             )
         except InvalidCaseRecordError as exc:
@@ -794,6 +804,7 @@ def datafold_read(
         datalist=datalist,
         basedir=basedir,
         key=key,
+        partitioning=partitioning,
         load_labels=load_labels,
     )
     requested_subset = str(subset_name).strip()

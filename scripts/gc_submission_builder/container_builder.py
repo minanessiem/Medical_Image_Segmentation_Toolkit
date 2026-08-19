@@ -24,6 +24,11 @@ from scripts.gc_submission_builder.container_config import (
     ContainerBuildConfig,
 )
 from scripts.gc_submission_builder.release_manifest import sha256_file
+from scripts.gc_submission_builder.runtime.image_io import (
+    CANONICAL_GEOMETRY_ELEMENT_TOLERANCE,
+    CANONICAL_WORLD_COORDINATE_TOLERANCE_MM,
+    sitk_ras_affine,
+)
 from scripts.gc_submission_builder.runtime.interfaces import (
     OutputBinding,
     load_interface_manifest,
@@ -384,9 +389,19 @@ def validate_single_input_output_set(
     paths: dict[str, Path] = {}
     validations: dict[str, Mapping[str, Any]] = {}
     reference = None
+    nifti_reference = None
     if input_path is not None:
+        resolved_input = Path(input_path).expanduser().resolve()
         try:
-            reference = sitk.ReadImage(str(Path(input_path).expanduser().resolve()))
+            lower_name = resolved_input.name.lower()
+            if lower_name.endswith((".nii", ".nii.gz")):
+                # The runtime canonicalizes NIfTI inputs with nibabel, whose
+                # selected affine follows the NIfTI qform/sform precedence
+                # rules.  SimpleITK may select the other form when they
+                # disagree, so it is not an authoritative reference here.
+                nifti_reference = nib.load(str(resolved_input))
+            else:
+                reference = sitk.ReadImage(str(resolved_input))
         except Exception as exc:
             raise ContainerBuildError(
                 "Could not reopen the sole native input for output-set validation."
@@ -426,6 +441,7 @@ def validate_single_input_output_set(
                 path,
                 result_key=binding.result_key,
                 reference=reference,
+                nifti_reference=nifti_reference,
             )
         paths[binding.slug] = path
         validations[binding.slug] = validation
@@ -437,10 +453,15 @@ def _validate_mha_output(
     *,
     result_key: str,
     reference: sitk.Image | None,
+    nifti_reference: nib.spatialimages.SpatialImage | None = None,
 ) -> Mapping[str, Any]:
+    if reference is not None and nifti_reference is not None:
+        raise ContainerBuildError("MHA validation accepts exactly one native reference.")
     try:
         image = sitk.ReadImage(str(path))
-        array = sitk.GetArrayFromImage(image)
+        # A view avoids duplicating multi-gigabyte native probability volumes
+        # while still independently validating every voxel.
+        array = sitk.GetArrayViewFromImage(image)
     except Exception as exc:
         raise ContainerBuildError("Could not reopen declared MHA output.") from exc
     if image.GetDimension() != 3:
@@ -466,11 +487,32 @@ def _validate_mha_output(
             ("origin", image.GetOrigin(), reference.GetOrigin()),
             ("direction", image.GetDirection(), reference.GetDirection()),
         ):
-            if not np.allclose(observed, expected, rtol=0, atol=1e-5):
+            if not np.allclose(
+                observed,
+                expected,
+                rtol=0,
+                atol=CANONICAL_GEOMETRY_ELEMENT_TOLERANCE,
+            ):
                 raise ContainerBuildError(
                     f"MHA output {name} does not match the sole native input."
                 )
         _validate_world_coordinate_landmarks(image, reference)
+    if nifti_reference is not None:
+        if tuple(image.GetSize()) != tuple(int(value) for value in nifti_reference.shape):
+            raise ContainerBuildError(
+                "MHA output size does not match the sole native input."
+            )
+        observed_affine = sitk_ras_affine(image)
+        expected_affine = np.asarray(nifti_reference.affine, dtype=np.float64)
+        if not np.allclose(
+            observed_affine,
+            expected_affine,
+            rtol=0,
+            atol=CANONICAL_GEOMETRY_ELEMENT_TOLERANCE,
+        ):
+            raise ContainerBuildError(
+                "MHA output affine does not match the sole native input affine."
+            )
     try:
         with path.open("rb") as handle:
             header = handle.read(65536).split(b"ElementDataFile", 1)[0]
@@ -483,7 +525,9 @@ def _validate_mha_output(
         "file_type": "mha",
         "shape": list(reversed(array.shape)),
         "dtype": str(array.dtype),
-        "spatial_validation": "passed" if reference is not None else None,
+        "spatial_validation": (
+            "passed" if reference is not None or nifti_reference is not None else None
+        ),
         "compressed": True,
     }
 
@@ -575,7 +619,12 @@ def _validate_world_coordinate_landmarks(
     for index in landmarks:
         observed_point = observed.TransformIndexToPhysicalPoint(index)
         expected_point = expected.TransformIndexToPhysicalPoint(index)
-        if not np.allclose(observed_point, expected_point, rtol=0, atol=1e-5):
+        if not np.allclose(
+            observed_point,
+            expected_point,
+            rtol=0,
+            atol=CANONICAL_WORLD_COORDINATE_TOLERANCE_MM,
+        ):
             raise ContainerBuildError(
                 "MHA output world-coordinate landmarks do not match the sole "
                 "native input."

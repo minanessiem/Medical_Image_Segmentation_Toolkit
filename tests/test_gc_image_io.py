@@ -144,6 +144,46 @@ class TestGcImageIo(unittest.TestCase):
             self.assertFalse(canonical_path.exists())
             self.assertFalse(any(root.glob("gc-input-*")))
 
+    def test_canonicalize_full_volume_mha_allows_nifti_header_rounding(self):
+        angle = np.deg2rad(17.0)
+        direction = (
+            float(np.cos(angle)),
+            float(-np.sin(angle)),
+            0.0,
+            float(np.sin(angle)),
+            float(np.cos(angle)),
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+        size = (256, 120, 256)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_path = root / "full-volume-platform-generated.mha"
+            source = sitk.Image(list(size), sitk.sitkUInt8)
+            source.SetSpacing((0.9375037, 0.9374981, 3.0000047))
+            source.SetOrigin((-126.4, -97.2, 42.1))
+            source.SetDirection(direction)
+            sitk.WriteImage(source, str(source_path), useCompression=True)
+
+            with canonicalize_image_inputs(
+                {"T1": _resolved_image(source_path, source_format="mha")},
+                scratch_root=root,
+            ) as canonicalized:
+                canonical = canonicalized.inputs["T1"]
+                reopened = sitk.ReadImage(str(canonical.canonical_path))
+                far_corner = tuple(value - 1 for value in size)
+                source_point = source.TransformIndexToPhysicalPoint(far_corner)
+                canonical_point = reopened.TransformIndexToPhysicalPoint(far_corner)
+                drift_mm = max(
+                    abs(observed - expected)
+                    for observed, expected in zip(canonical_point, source_point)
+                )
+                self.assertGreater(drift_mm, 1e-5)
+                self.assertLess(drift_mm, 1e-3)
+                self.assertEqual(sitk.Hash(reopened), sitk.Hash(source))
+
     def test_canonicalize_uncompressed_nifti_is_lossless_and_gz_input_passes_through(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

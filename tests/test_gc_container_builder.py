@@ -18,6 +18,7 @@ from scripts.gc_submission_builder.container_builder import (
     LOCAL_INVOKE_TIMEOUT_SECONDS,
     ContainerBuildError,
     _run_http_sidecar,
+    _validate_world_coordinate_landmarks,
     _wait_for_health,
     build_container_image,
     save_container_image,
@@ -70,6 +71,41 @@ def _content_audit_payload(*, model_files=(), weight_files=()):
 
 
 class TestGcContainerBuilder(unittest.TestCase):
+    def test_world_landmarks_allow_full_volume_nifti_header_rounding(self):
+        angle = np.deg2rad(17.0)
+        expected = sitk.Image([256, 120, 256], sitk.sitkUInt8)
+        expected.SetSpacing((0.9375037, 0.9374981, 3.0000047))
+        expected.SetOrigin((-126.4, -97.2, 42.1))
+        expected.SetDirection(
+            (
+                float(np.cos(angle)),
+                float(-np.sin(angle)),
+                0.0,
+                float(np.sin(angle)),
+                float(np.cos(angle)),
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical_path = Path(tmp) / "canonical.nii.gz"
+            sitk.WriteImage(expected, str(canonical_path), useCompression=True)
+            observed = sitk.ReadImage(str(canonical_path))
+
+        far_corner = tuple(value - 1 for value in expected.GetSize())
+        drift_mm = max(
+            abs(observed_value - expected_value)
+            for observed_value, expected_value in zip(
+                observed.TransformIndexToPhysicalPoint(far_corner),
+                expected.TransformIndexToPhysicalPoint(far_corner),
+            )
+        )
+        self.assertGreater(drift_mm, 1e-5)
+        self.assertLess(drift_mm, 1e-3)
+        _validate_world_coordinate_landmarks(observed, expected)
+
     def test_default_config_is_linux_amd64_and_official_manifest_is_explicit(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = load_container_build_config(
@@ -379,6 +415,46 @@ class TestGcContainerBuilder(unittest.TestCase):
                     output_root=root / "output",
                     input_path=input_path,
                 )
+
+    def test_external_mha_validation_uses_selected_nifti_sform(self):
+        binding = OutputBinding(
+            slug="segmentation",
+            result_key="mask",
+            relative_path="images/segmentation",
+            file_type="mha",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_path = root / "input.nii.gz"
+            qform = np.eye(4, dtype=np.float64)
+            sform = np.diag([1.25, 2.5, 3.75, 1.0])
+            sform[:3, 3] = [9.0, -7.0, 3.0]
+            input_image = nib.Nifti1Image(
+                np.zeros((3, 4, 5), dtype=np.float32),
+                sform,
+            )
+            input_image.set_qform(qform, code=1)
+            input_image.set_sform(sform, code=2)
+            nib.save(input_image, input_path)
+
+            output_path = root / "output" / "images" / "segmentation" / "output.mha"
+            output_path.parent.mkdir(parents=True)
+            output_image = sitk.GetImageFromArray(np.zeros((5, 4, 3), dtype=np.uint8))
+            output_image.SetSpacing((1.25, 2.5, 3.75))
+            output_image.SetOrigin((-9.0, 7.0, 3.0))
+            output_image.SetDirection((-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0))
+            sitk.WriteImage(output_image, str(output_path), True)
+
+            _, validations = validate_single_input_output_set(
+                bindings=(binding,),
+                output_root=root / "output",
+                input_path=input_path,
+            )
+
+            self.assertEqual(
+                validations["segmentation"]["spatial_validation"],
+                "passed",
+            )
 
     def test_external_nifti_validation_rejects_geometry_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

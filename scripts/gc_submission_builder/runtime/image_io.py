@@ -41,6 +41,14 @@ class MedicalImageInspection:
 NiftiInputInspection = MedicalImageInspection
 
 
+# NIfTI stores spatial header values at finite precision. Tiny spacing and
+# direction rounding is amplified when a physical point is evaluated hundreds
+# of voxels from the origin, so the accumulated world-coordinate comparison
+# needs a physical-space tolerance rather than the per-header-element tolerance.
+CANONICAL_GEOMETRY_ELEMENT_TOLERANCE = 1e-5
+CANONICAL_WORLD_COORDINATE_TOLERANCE_MM = 1e-3
+
+
 @dataclass(frozen=True)
 class CanonicalImageInput:
     dataset_key: str
@@ -333,7 +341,12 @@ def _validate_sitk_equivalence(source: sitk.Image, canonical: sitk.Image) -> Non
         ("origin", canonical.GetOrigin(), source.GetOrigin()),
         ("direction", canonical.GetDirection(), source.GetDirection()),
     ):
-        if not np.allclose(observed, expected, rtol=0, atol=1e-5):
+        if not np.allclose(
+            observed,
+            expected,
+            rtol=0,
+            atol=CANONICAL_GEOMETRY_ELEMENT_TOLERANCE,
+        ):
             raise ImageTransportError(
                 f"Canonical NIfTI {name} does not match the platform image."
             )
@@ -347,7 +360,12 @@ def _validate_sitk_equivalence(source: sitk.Image, canonical: sitk.Image) -> Non
     for index in landmarks:
         source_point = source.TransformIndexToPhysicalPoint(index)
         canonical_point = canonical.TransformIndexToPhysicalPoint(index)
-        if not np.allclose(source_point, canonical_point, rtol=0, atol=1e-5):
+        if not np.allclose(
+            source_point,
+            canonical_point,
+            rtol=0,
+            atol=CANONICAL_WORLD_COORDINATE_TOLERANCE_MM,
+        ):
             raise ImageTransportError(
                 "Canonical NIfTI world coordinates do not match the platform image."
             )
@@ -373,7 +391,7 @@ def _validate_inspection_equivalence(
             )
 
 
-def _sitk_ras_affine(image: sitk.Image) -> np.ndarray:
+def sitk_ras_affine(image: sitk.Image) -> np.ndarray:
     direction = np.asarray(image.GetDirection(), dtype=np.float64).reshape(3, 3)
     spacing = np.asarray(image.GetSpacing(), dtype=np.float64)
     origin = np.asarray(image.GetOrigin(), dtype=np.float64)
@@ -382,6 +400,10 @@ def _sitk_ras_affine(image: sitk.Image) -> np.ndarray:
     lps_affine[:3, 3] = origin
     lps_to_ras = np.diag([-1.0, -1.0, 1.0, 1.0])
     return lps_to_ras @ lps_affine
+
+
+# Backward-compatible private alias for existing internal callers.
+_sitk_ras_affine = sitk_ras_affine
 
 
 def _require_scratch_capacity(scratch_root: Path, *, required_bytes: int) -> None:
@@ -742,6 +764,7 @@ __all__ = [
     "canonicalize_image_inputs",
     "inspect_nifti_input",
     "materialize_prediction_outputs",
+    "sitk_ras_affine",
     "write_mha_prediction",
     "write_nifti_prediction",
 ]
