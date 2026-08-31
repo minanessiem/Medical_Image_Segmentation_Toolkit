@@ -1,0 +1,6 @@
+defaults:
+  - isles26_cluster
+  - _self_
+
+dataset:
+  split_file: '/mnt/datasets/isles26_combined/atlas21_training_raw/isles26_soopincluded_3fold_2026_08_09.json'
