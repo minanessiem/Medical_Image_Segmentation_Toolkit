@@ -1,9 +1,0 @@
-# AMP BFloat16 training config with 500K max steps
-# Sample-equivalent to 1M-step runs at half the global batch size
-#
-# Usage: training=train_500Kms_ampbfloat16
-
-defaults:
-  - train_100Kms_ampbfloat16
-
-max_steps: 500000

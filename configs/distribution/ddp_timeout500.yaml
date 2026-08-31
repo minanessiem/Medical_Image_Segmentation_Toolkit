@@ -1,4 +1,0 @@
-defaults:
-  - ddp
-
-timeout_minutes: 500

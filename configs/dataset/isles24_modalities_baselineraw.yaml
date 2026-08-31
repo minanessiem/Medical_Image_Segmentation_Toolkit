@@ -1,8 +1,0 @@
-defaults:
-  - isles24_base
-
-modalities: ['CBF_RAW', 'TMAX_RAW']
-num_modalities: 2
-nnunet:
-  dataset_id: "060"
-  dataset_name: "isles24_baseline_raw"

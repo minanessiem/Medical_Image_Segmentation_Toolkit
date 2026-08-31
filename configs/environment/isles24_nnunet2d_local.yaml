@@ -1,7 +1,0 @@
-defaults:
-  - isles_local
-
-dataset:
-  data_root: null
-  split_file: null
-  nnunet_root: './nnunet_raw'

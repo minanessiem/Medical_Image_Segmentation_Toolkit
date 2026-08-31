@@ -1,8 +1,0 @@
-defaults:
-  - default
-
-# Logging config optimized for DDIM with 250 respaced steps
-# 10 evenly spaced snapshots across the 250 actual sampling steps
-# Note: DDIM with timestep_respacing="250" actually samples at 250 discrete points
-snapshot_step_interval: 25  # 250 / 10 = 25 steps between snapshots
-

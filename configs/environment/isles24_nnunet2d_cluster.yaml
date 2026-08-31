@@ -1,7 +1,0 @@
-defaults:
-  - isles_cluster
-
-dataset:
-  data_root: null
-  split_file: null
-  nnunet_root: '/mnt/datasets/nnunet_raw'

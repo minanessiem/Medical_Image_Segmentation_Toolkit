@@ -1,5 +1,0 @@
-# Wrapper: local base + OpenAI DDPM-100 + correct logging
-defaults:
-  - local                      # pull in the entire local base
-  - override /diffusion: openai_ddpm_100ts_debug
-  - override /logging: ddpm_100steps

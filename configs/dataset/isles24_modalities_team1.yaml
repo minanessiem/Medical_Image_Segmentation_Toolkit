@@ -1,8 +1,0 @@
-defaults:
-  - isles24_base
-
-modalities: ['CTA_w_75_l_40', 'CBF_min_0_max_70', 'CBV_min_0_max_9', 'MTT_min_10_max_30', 'TMAX_min_4_max_30']
-num_modalities: 5
-nnunet:
-  dataset_id: "052"
-  dataset_name: "isles24_team1"

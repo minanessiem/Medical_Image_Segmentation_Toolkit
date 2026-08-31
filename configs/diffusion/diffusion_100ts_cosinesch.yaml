@@ -1,3 +1,0 @@
-type: DDPM
-timesteps: 100
-noise_schedule: "cosine"

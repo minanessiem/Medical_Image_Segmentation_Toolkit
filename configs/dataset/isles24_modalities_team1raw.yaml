@@ -1,8 +1,0 @@
-defaults:
-  - isles24_base
-
-modalities: ['CTA_RAW', 'CBF_RAW', 'CBV_RAW', 'MTT_RAW', 'TMAX_RAW']
-num_modalities: 5
-nnunet:
-  dataset_id: "062"
-  dataset_name: "isles24_team1_raw"

@@ -1,5 +1,0 @@
-# Wrapper: cluster base + OpenAI DDPM-1000 + correct logging
-defaults:
-  - cluster                     # pull in the entire cluster base
-  - override /diffusion: openai_ddpm_1000ts_cosine
-  - override /logging: ddpm_1000steps

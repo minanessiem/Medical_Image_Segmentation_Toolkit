@@ -1,6 +1,0 @@
-# Local baseline using precomputed nnUNet 2D slices as training input.
-defaults:
-  - local
-  - override /environment: isles24_nnunet2d_local
-  - override /data_profile: isles24_2d_nnunet_baseline
-  - override /data_runtime: local

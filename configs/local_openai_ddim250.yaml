@@ -1,5 +1,0 @@
-# Wrapper: local base + OpenAI DDIM-250 + correct logging
-defaults:
-  - local                      # pull in the entire local base
-  - override /diffusion: openai_ddim_250steps
-  - override /logging: ddim_250steps

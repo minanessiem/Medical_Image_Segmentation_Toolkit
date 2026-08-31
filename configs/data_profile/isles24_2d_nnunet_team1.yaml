@@ -1,6 +1,0 @@
-# @package _global_
-
-defaults:
-  - isles24_2d_nnunet_baseline
-  - override /dataset: isles24_modalities_team1
-  - _self_

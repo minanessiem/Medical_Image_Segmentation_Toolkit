@@ -1,7 +1,0 @@
-# @package _global_
-
-defaults:
-  - /dataset: isles24_modalities_baseline
-  - /data_mode: full_volumes_3d
-  - /data_io: isles24_online_volumes
-  - _self_

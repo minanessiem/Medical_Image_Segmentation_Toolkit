@@ -1,8 +1,0 @@
-defaults:
-  - isles24_base
-
-modalities: ['CBF_RAW', 'CTA_RAW', 'NCCT_RAW', 'TMAX_RAW']
-num_modalities: 4
-nnunet:
-  dataset_id: "061"
-  dataset_name: "isles24_emperical_raw"

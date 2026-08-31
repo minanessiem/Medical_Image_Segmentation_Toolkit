@@ -1,5 +1,0 @@
-# Wrapper: cluster base + OpenAI DDIM-250 + correct logging
-defaults:
-  - cluster                     # base cluster environment
-  - override /diffusion: openai_ddim_250steps
-  - override /logging: ddim_250steps
