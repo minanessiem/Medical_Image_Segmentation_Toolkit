@@ -12,6 +12,7 @@ Top-level configurations compose reusable groups from the subdirectories:
 
 - `environment/`: dataset, output, and machine-specific paths
 - `dataset/`: split definitions, modalities, and preprocessing
+- `data_io/`: data roots and split-manifest or nnU-Net paths
 - `data_profile/`: dataset, loading mode, and data-I/O composition
 - `data_runtime/`: batch sizes, workers, caching, and memory settings
 - `model/`: network architecture
