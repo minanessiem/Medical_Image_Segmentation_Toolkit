@@ -1,220 +1,170 @@
-# Configuration Documentation
+# Configuration Guide
 
-## Overview
-This directory contains Hydra configuration files for the project, organized for modularity and composability. Key groups include:
-- **environment/**: Environment-specific settings (e.g., paths, num_workers, device). Variants: local.yaml, cluster.yaml.
-- **dataset/**: Dataset configurations. Use base_isles24.yaml for shared settings, composed with environment.
-- **model/**: Model architectures (e.g., unet_local.yaml, unet_cluster.yaml).
-- **training/**: Training loop parameters (e.g., max_steps, checkpoints). Variants: train_local.yaml, train_cluster.yaml (now slimmed down).
-- **optimizer/**: Optimizer and scheduler settings (e.g., default.yaml with learning_rate, reduce_lr).
-- **diffusion/**: Diffusion-specific params (e.g., default.yaml with timesteps, noise_schedule).
-- **validation/** and **logging/**: As before.
+This directory contains the Hydra configurations for the repository's
+configuration-driven medical-volume segmentation pipeline. The retained
+configurations principally support the ISLES'26 DynUNet submission, its
+nnU-Net baseline, and the ATLAS v2.1 experiments that informed the final
+pipeline.
 
-Top-level files like cluster.yaml and local.yaml compose these groups via defaults lists.
+## Configuration composition
 
-## Diffusion Backends
+Top-level configurations compose reusable groups from the subdirectories:
 
-### Current Implementation (Custom)
-- `diffusion_100ts_cosinesch.yaml` - Custom DDPM (100 steps, cosine)
+- `environment/`: dataset, output, and machine-specific paths
+- `dataset/`: split definitions, modalities, and preprocessing
+- `data_profile/`: dataset, loading mode, and data-I/O composition
+- `data_runtime/`: batch sizes, workers, caching, and memory settings
+- `model/`: network architecture
+- `augmentation/`: spatial and intensity transformations
+- `loss/`: objective functions and supervision policy
+- `optimizer/` and `scheduler/`: optimization settings
+- `training/`: training duration, precision, and checkpointing
+- `validation/` and `inference/`: prediction and evaluation settings
+- `nnunet/`: nnU-Net conversion and evaluation settings
 
-### OpenAI Implementation
-Based on OpenAI's improved-diffusion package.
+Top-level files such as `cluster.yaml` and `local.yaml` provide general
+composition bases. More specific top-level configurations override these
+defaults for a dataset, model, and experimental setting. Hydra command-line
+overrides take precedence over all composed values.
 
-**Note:** All OpenAI configs use `type: OpenAI_DDPM` but support both DDPM and DDIM sampling modes via the `sampling_mode` parameter. This matches OpenAI's architecture where both are sampling strategies from the same `GaussianDiffusion` class.
+The `diffusion/` group remains part of the shared configuration interface.
+ISLES'26 segmentation selects `diffusion/discriminative.yaml`, which
+disables diffusion and performs direct segmentation.
 
-**DDPM (Standard):**
-- `openai_ddpm_1000ts_cosine.yaml` - Full 1000-step DDPM (`sampling_mode: ddpm`)
-- `openai_ddpm_100ts_debug.yaml` - Fast 100-step for debugging (`sampling_mode: ddpm`)
+## Configure paths and hardware
 
-**DDIM (Fast Sampling):**
-- `openai_ddim_50steps.yaml` - 50-step DDIM (20x faster sampling, `sampling_mode: ddim`)
-- `openai_ddim_250steps.yaml` - 250-step DDIM (4x faster sampling, `sampling_mode: ddim`)
+Before training, create or adapt an environment configuration corresponding
+to the intended execution environment.
 
-**Experimental:**
-- `openai_loss_aware.yaml` - Loss-aware sampling
+The principal machine-specific values are:
 
-### Choosing a Config
+- `environment.dataset.data_root`
+- `environment.dataset.split_file`
+- `environment.dataset.nnunet_root`, when required
+- `environment.training.output_root`
+- `environment.device`
 
-**For training:**
-- Development/debugging: `openai_ddpm_100ts_debug`
-- Production: `openai_ddpm_1000ts_cosine`
+The `data_runtime/` group controls batch sizes, worker counts, caching,
+prefetching, and memory-related settings. Some top-level experiment
+configurations override these values for the hardware on which the original
+runs were performed. Adaptations for other systems should preserve the
+experimental configuration while adjusting only the required runtime
+parameters.
 
-**For sampling (inference):**
-- Fast preview: `openai_ddim_50steps` (50 steps)
-- Balanced: `openai_ddim_250steps` (250 steps)
-- Best quality: `openai_ddpm_1000ts_cosine` (1000 steps)
+## ATLAS v2.1 development configurations
 
-### Logging Integration
+The ATLAS v2.1 configurations preserve the staged development work that
+preceded the final three-fold training.
 
-Each diffusion config automatically includes optimized logging settings:
-- **Snapshot interval** is adjusted to show **10 evenly spaced** snapshots during sampling
-- For DDPM (100 steps): interval=10 → snapshots at t=100, 90, 80, ..., 10, 0
-- For DDPM (1000 steps): interval=100 → snapshots at t=1000, 900, 800, ..., 100, 0
-- For DDIM (50 steps): interval=5 → snapshots at 10 evenly spaced respaced timesteps
-- For DDIM (250 steps): interval=25 → snapshots at 10 evenly spaced respaced timesteps
+Principal top-level configurations include:
 
-**Note:** DDIM respacing means the actual sampling happens at fewer discrete timesteps. The logging configs account for this to ensure you see the full denoising progression.
+- `cluster_isles26_3d_randompatch_dynunet.yaml`
+- `local_isles26_3d_randompatch_dynunet.yaml`
+- `cluster_isles26_3d_randompatch_swinunetr.yaml`
+- `local_isles26_3d_randompatch_swinunetr.yaml`
+- `cluster_isles26_3d_randompatch_dynunet_params_26062026.yaml`
 
-### Config Parameters
+The DynUNet and SwinUNETR configurations support the architecture
+comparison. The parameter-sweep configuration records the DynUNet capacity
+and topology experiments.
 
-See `openai_base.yaml` for detailed parameter documentation.
+The associated configuration groups retain the alternatives evaluated
+during staged development, including:
 
-## Composition and Usage
-Run the project with Hydra, overriding groups as needed:
-- Local run: `python main.py --config-name local`
-- Cluster run with custom optimizer: `python main.py --config-name cluster optimizer=high_lr` (assuming high_lr.yaml exists in optimizer/).
-- Test new diffusion: `python main.py --config-name local diffusion=openai_ddpm_100ts_debug` (to use OpenAI implementation).
+- raw and normalized T1 representations in `data_profile/` and `dataset/`
+- spatial and intensity augmentation policies in `augmentation/`
+- Dice, BCE, focal, Tversky, generalized-Dice, and Hausdorff-distance
+  objective variants in `loss/`
+- DynUNet and SwinUNETR architectures in `model/`
+- training, optimizer, scheduler, validation, and inference variants
 
-Evaluation is handled by the dedicated `scripts/evaluation` package rather than
-by `main.py` or `start_training.py` modes.
+Individual staged experiments are reconstructed by composing the relevant
+top-level configuration with the corresponding group selections and
+parameter overrides.
 
-Interpolation is used (e.g., ${environment.training.output_root} in training templates).
+The standard ATLAS v2.1 environments are:
 
-## nnUNet 2D Context Window
+- `environment/isles26_cluster.yaml`
+- `environment/isles26_local.yaml`
 
-The `nnunet_slices_2d` data mode supports optional neighboring-slice context:
+These configurations refer to the ATLAS v2.1 development split and must be
+adapted to the local dataset and output paths.
 
-- `data_mode.per_side_context_slices` (default `0`)
-- `data_mode.channel_layout` (`slice_major` or `modality_major`)
+## ATLAS v3.0 configurations
 
-Definitions:
+The initial ATLAS v3.0 configuration extends the ATLAS v2.1 pipeline to the
+updated training data:
 
-- `num_effective_slices = 2 * per_side_context_slices + 1`
-- `effective_input_channels = dataset.num_modalities * num_effective_slices`
+- `cluster_isles26_atlas30_3d_randompatch_dynunet.yaml`
 
-Important:
+Its associated configuration components include:
 
-- `model.image_channels` is auto-synced from the active data contract at runtime.
-- Manual `model.image_channels` override is optional (for explicitness only).
-- Boundary neighbors are zero-padded.
-- `dim` remains `2d` and loader mode remains `nnunet_slices_2d`.
+- `environment/isles26_atlas30_cluster.yaml`
+- `environment/isles26_atlas30_local.yaml`
+- `dataset/isles26_atlas30_modalities_t1raw.yaml`
+- `data_profile/isles26_atlas30_3d_fullvol_t1raw.yaml`
 
-Example override:
+These files represent the ATLAS v3.0 setup before construction of the final
+SOOP-inclusive three-fold split.
 
-```bash
-python3 -m start_training \
-  --config-name local_nnunet2d_baseline \
-  data_mode.per_side_context_slices=1 \
-  data_mode.channel_layout=slice_major
-```
+## ATLAS v3.0 and SOOP three-fold configurations
 
-## Checkpoint Configuration
+The final ISLES'26 training setup uses the combined ATLAS v3.0 and SOOP
+cases with a site-aware, metadata-stratified three-fold split.
 
-The training system supports two independent checkpoint strategies:
+The supplied split manifest is:
 
-### Interval Checkpoints
-Periodic safety backups for training resumption. Configured in `training/checkpoint_interval`:
+`isles26_split/isles26_soopincluded_3fold_2026_08_09.json`
 
-- `enabled`: Enable/disable interval checkpointing (boolean)
-- `save_interval`: Steps between saves (e.g., 5000, 10000)
-- `keep_last_n`: Retain only N most recent checkpoints via FIFO policy (null = keep all)
-- `model_template`: Filename template for model checkpoint
-- `opt_template`: Filename template for optimizer state
+The environment configurations are:
 
-**Use case**: Fault recovery, training resumption after interruptions
+- `environment/isles26_atlas30_soopincluded_3fold_cluster.yaml`
+- `environment/isles26_atlas30_soopincluded_3fold_local.yaml`
 
-**Saved artifacts**: Model state dict + optimizer state dict
+The fold-specific dataset configurations are:
 
-### Best Model Checkpoints
-Quality-gated saves based on validation metrics. Configured in `training/checkpoint_best`:
+- `dataset/isles26_atlas30_soopincluded_3fold_fold1_t1raw.yaml`
+- `dataset/isles26_atlas30_soopincluded_3fold_fold2_t1raw.yaml`
+- `dataset/isles26_atlas30_soopincluded_3fold_fold3_t1raw.yaml`
 
-- `enabled`: Enable/disable metric-based checkpointing (boolean)
-- `metric_name`: Validation metric to track (e.g., "dice_2d_fg", "f1_2d")
-  - **Important**: Use the metric key from validation results (no "val_" prefix)
-- `metric_mode`: "max" (higher is better) or "min" (lower is better)
-- `keep_last_n`: Retain only top N checkpoints by metric value (null = keep all)
-- `save_metrics_csv`: Save CSV file with all validation metrics alongside checkpoint (boolean, default: true)
-- `model_template`: Filename template for model checkpoint (includes metric value)
-- `ema_template`: Filename template for EMA checkpoint (includes metric value)
-- `metrics_template`: Filename template for metrics CSV file (includes metric value)
+Human-readable folds 1, 2, and 3 correspond to manifest fold values 0, 1,
+and 2, respectively. Each fold configuration assigns its selected fold to
+validation and the remaining folds to training.
 
-**Use case**: Inference, model selection, experiment comparison
+Local and cluster top-level training configurations are supplied for every
+fold:
 
-**Saved artifacts**: Model state dict + all configured EMA state dicts + metrics CSV (optional)
+- `cluster_isles26_atlas30_soopincluded_3fold_fold[1-3]_3d_randompatch_dynunet.yaml`
+- `local_isles26_atlas30_soopincluded_3fold_fold[1-3]_3d_randompatch_dynunet.yaml`
 
-### Configuration Examples
+These configurations establish the fold, data representation, preprocessing,
+model family, training schedule, validation protocol, and machine profile.
+The final submitted DynUNet runs pair them with spatial-only augmentation,
+Dice–focal final-head supervision, and feature widths of
+`[32, 64, 128, 256]`.
 
-**Minimal (interval only)**:
-```yaml
-checkpoint_interval:
-  enabled: true
-  save_interval: 10000
-  keep_last_n: 2
-checkpoint_best:
-  enabled: false
-```
+Although the DynUNet exposes auxiliary deep-supervision outputs, the selected
+Dice–focal configuration supervises only the final prediction head.
 
-**Quality-focused (best models)**:
-```yaml
-checkpoint_interval:
-  enabled: true
-  save_interval: 10000
-  keep_last_n: 3
-checkpoint_best:
-  enabled: true
-  metric_name: "dice_2d_fg"
-  metric_mode: "max"
-  keep_last_n: 5
-  save_metrics_csv: true  # Save CSV with all metrics
-```
+## nnU-Net baseline configurations
 
-**Track loss instead**:
-```yaml
-checkpoint_best:
-  enabled: true
-  metric_name: "test_loss"
-  metric_mode: "min"
-  keep_last_n: 3
-```
+The `nnunet/convert/` directory contains local and cluster conversion
+configurations for the ATLAS v2.1, ATLAS v3.0, and SOOP-inclusive
+three-fold data arrangements.
 
-### File Organization
+The final fold-specific conversion configurations follow the naming pattern:
 
-Checkpoints are saved to subdirectories under the run output directory:
-```
-outputs/run_name_timestamp/
-├── models/
-│   ├── checkpoint/          # Interval checkpoints (FIFO retention)
-│   │   ├── diffusion_chkpt_step_095000.pth
-│   │   ├── opt_chkpt_step_095000.pth
-│   │   └── ...
-│   └── best/                # Best model checkpoints (quality-based retention)
-│       ├── best_model_step_052000_dice_2d_fg_0.8456.pth
-│       ├── best_model_step_052000_dice_2d_fg_0.8456_ema_0.9999.pth
-│       ├── best_model_step_052000_dice_2d_fg_0.8456_metrics.csv
-│       └── ...
-```
+- `isles26_atlas30_soopincluded_3fold_fold[1-3]_cluster_3d_t1raw.yaml`
+- `isles26_atlas30_soopincluded_3fold_fold[1-3]_local_3d_t1raw.yaml`
 
-**Metrics CSV Format**: When `save_metrics_csv: true`, a CSV file is saved with all validation metrics:
-```csv
-metric_key,metric_value
-dice_2d_fg,0.845632
-f1_2d,0.823451
-precision_2d,0.891234
-recall_2d,0.778901
-```
-Metric values are formatted with 6 decimal places for consistency.
+They compose the same raw T1 inputs and fold assignments as the corresponding
+DynUNet configurations while supplying the paths and metadata required by
+nnU-Net.
 
-### Checkpoint Logging
+## Configuration scope
 
-The system provides clear logging for all checkpoint decisions:
-- `✓ Saving interval checkpoint at step X`
-- `✓ Saving best model: dice_2d_fg improved 0.8234 → 0.8456`
-- `✗ Skipping best model save: dice_2d_fg did not improve (current: 0.8234, best: 0.8456)`
-- `🗑️ Removed old interval checkpoint: diffusion_chkpt_step_005000.pth`
-- `🗑️ Removed worse best checkpoint: best_model_step_010000_dice_0.8001.pth`
-
-### Error Handling
-
-If `metric_name` doesn't exist in validation results, training will crash with a clear error message:
-```
-❌ ERROR: Checkpoint metric 'dice_2d' not found in validation results.
-   Validation returned metrics: ['dice_2d_fg', 'f1_2d', 'precision_2d', ...]
-   Check your checkpoint_best.metric_name config!
-```
-
-## Deprecations
-- Old dataset files (isles24_local.yaml, isles24_cluster.yaml) are deprecated. Use `dataset: base_isles24` with the appropriate environment instead.
-- Removed keys (e.g., learning_rate from training/) are now in optimizer/ or diffusion/.
-- **As of 2025-11-21**: `checkpoint_save_interval`, `main_checkpoint_template`, `ema_checkpoint_template`, `opt_checkpoint_template` are deprecated. Use `checkpoint_interval` and `checkpoint_best` config groups instead.
-
-For more on Hydra: https://hydra.cc/docs/intro/
+A small number of legacy defaults remain because `cluster.yaml` and
+`local.yaml` still reference them. They support the general configuration
+base but do not define the ISLES'26 experiments. For reproduction, select
+one of the dataset-specific ATLAS v2.1 or ATLAS v3.0 top-level
+configurations rather than either base configuration alone.
